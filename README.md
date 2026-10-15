@@ -52,9 +52,39 @@ Then start [Ollama](https://ollama.com) and pull a model from the
   - Load or unload a model.
   - View a model's details: template, parameters, license, context length.
   - Pull new models with a progress bar, and delete models.
+- **Library**: a place to keep **documents** (reference material the AI
+  can read) and **templates** (examples of how answers should be laid out).
+  See [Library](#library) below.
 - **Multiple servers**: Ollama, plus OpenAI-compatible servers (LM Studio,
   llama.cpp `llama-server`, vLLM, LocalAI, Jan…). Models from every server
   appear in one picker under **Settings › Model**.
+
+## Library
+
+Open **Library** in the left rail. It has two tabs:
+
+- **Documents**: notes, specs, policies, code, anything the AI should know
+  about. Create them in the editor, or click **Import…** to add text files
+  (`.txt`, `.md`, `.csv`, `.json`, source code…) or Word `.docx` files, which
+  are converted to text.
+- **Templates**: examples of how an answer should look. Write them with
+  headings, tables and `{{placeholders}}`; the AI copies the layout and fills
+  in the blanks. Three examples come with the app: meeting notes, a bug
+  report and an email.
+
+In a chat, click **Library** in the header to choose:
+
+- which **documents** the AI reads in that chat, and
+- which **template** it follows. **Auto** (the default) lets the AI see every
+  template and use the one that matches the request (ask for "a bug report
+  about…" and it uses *Bug report*). You can also pin one template, or choose
+  **None**.
+
+Documents and templates are plain files in the `documents` and `templates`
+folders inside your data folder (the **Folder** button opens it), so you can
+also edit them with any editor. With Ollama, the app enlarges the context
+window when documents are attached so they aren't cut off; set **Context
+(num_ctx)** under **Parameters** to choose it yourself.
 
 ## Web sandbox
 
@@ -136,5 +166,6 @@ vscode_assistant/widgets.py     styled widgets: main button, nav rail rows, pane
 vscode_assistant/theme.py       Professional, Ink and Glass palettes, font loading
 vscode_assistant/net.py         urllib helpers
 vscode_assistant/store.py       settings + chats on disk
+vscode_assistant/library.py     documents + templates, and the prompt text they add
 vscode_assistant/assets/        app icon, fonts, and ink art from NXBNVNB
 ```

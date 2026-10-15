@@ -7,6 +7,8 @@ import base64
 import json
 import os
 import queue
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -15,6 +17,7 @@ from datetime import datetime, timezone
 from tkinter import filedialog, messagebox, ttk
 
 from . import mdtk, net, providers, theme as themes, web
+from .library import TEXT_TYPES, Library
 from .store import Store, new_id
 from .widgets import (Btn, NavItem, Panel, ScrollFrame, Slip, Tab, bind_wheel, entry, style_ttk, textbox)
 
@@ -110,6 +113,17 @@ def fit_text(font, text, px):
         else:
             hi = mid - 1
     return text[:lo].rstrip() + "…"
+
+
+def context_size(system, messages):
+    """Ollama's default context (2–4k tokens) silently cuts off long documents;
+    pick a window that fits them, unless the chat sets num_ctx itself."""
+    chars = len(system) + sum(len(m.get("content") or "") for m in messages)
+    need = int(chars / 3.2) + 2048
+    size = 4096
+    while size < need and size < 32768:
+        size *= 2
+    return size
 
 
 def split_model(v):
@@ -262,6 +276,9 @@ class App:
         self.root.geometry("1280x820")
         self.root.minsize(860, 600)
         self.store = Store()
+        self.library = Library(self.store.dir)
+        self.lib_kind = "documents"
+        self.lib_current = None   # name of the item open in the Library editor
         self.q = queue.Queue()
         self.models = {}          # conn id -> [model dict] or None
         self.active_id = self.store.chats[0]["id"] if self.store.chats else None
@@ -310,7 +327,8 @@ class App:
         self.main = tk.Frame(self.root, bg=th["bg"])
         self.main.pack(side="left", fill="both", expand=True)
         self.build_rail()
-        self.views = {"chat": self.build_chat(), "models": self.build_models(), "settings": self.build_settings()}
+        self.views = {"chat": self.build_chat(), "models": self.build_models(), "library": self.build_library(),
+                      "settings": self.build_settings()}
         self.show_view("chat")
 
     def page_head(self, parent, title, sub):
@@ -368,7 +386,7 @@ class App:
             self.new_btn = Slip(r, th, f, "New", self.new_chat, sub="新しい会話", width=214, height=50)
         self.new_btn.pack(padx=18, pady=(0, 10))
         self.nav = {}
-        for key, label in (("chat", "Chat"), ("models", "Models"), ("settings", "Settings")):
+        for key, label in (("chat", "Chat"), ("models", "Models"), ("library", "Library"), ("settings", "Settings")):
             n = NavItem(r, th, f, key, label, self.show_view)
             n.pack(fill="x")
             self.nav[key] = n
@@ -453,6 +471,8 @@ class App:
         m.tk_popup(e.x_root, e.y_root)
 
     def show_view(self, name):
+        if getattr(self, "view", None) == "library" and name != "library" and not self.lib_confirm_leave():
+            return
         for k, v in self.views.items():
             if k == name:
                 v.pack(fill="both", expand=True)
@@ -465,6 +485,8 @@ class App:
             self.load_models_view()
         if name == "settings":
             self.fill_settings()
+        if name == "library":
+            self.load_library()
 
     # ── Chat view ───────────────────────────────────────────────────────
     def build_chat(self):
@@ -482,6 +504,8 @@ class App:
         self.browser_chip = tk.Label(tools, font=f["label"], padx=12, pady=6, cursor="hand2", highlightthickness=1)
         self.browser_chip.pack(side="left", padx=(0, 8))
         self.browser_chip.bind("<Button-1>", lambda e: self.toggle_browser())
+        self.library_btn = Btn(tools, th, f, "Library", self.context_dialog, small=True)
+        self.library_btn.pack(side="left", padx=(0, 8), fill="y")
         self.params_btn = Btn(tools, th, f, "Parameters", self.toggle_params, small=True)
         self.params_btn.pack(side="left", padx=(0, 8), fill="y")
         Btn(tools, th, f, "Export", lambda: self.export_chat(self.active()), small=True).pack(side="left", fill="y")
@@ -708,6 +732,12 @@ class App:
         else:
             self.browser_chip.configure(text=text, bg=th["panel_2"], fg=th["dim"], highlightbackground=th["line_2"])
 
+    def render_library_btn(self):
+        c = self.active()
+        n = len([d for d in (c or {}).get("docs", []) if d in self.library.names("documents")])
+        self.library_btn.configure(text=themes.case(self.th, "Library · %d doc%s" % (n, "" if n == 1 else "s")
+                                                    if n else "Library"))
+
     def toggle_browser(self):
         c = self.active() or self.new_chat()
         c["browser"] = not c.get("browser")
@@ -819,6 +849,7 @@ class App:
         c = self.active()
         self.render_title()
         self.render_browser_chip()
+        self.render_library_btn()
         self.fill_params()
         self.render_model_box()
         self.update_send_btn()
@@ -985,9 +1016,15 @@ class App:
                 box.allow_private = bool(bs.get("allow_private"))
                 box.allow_search = bool(bs.get("allow_search", True))
             steps = int(bs.get("max_steps") or 12)
+            lib_context = self.library.context_prompt(c.get("docs"), c.get("template", "auto"))
+            params = dict(c["params"])
+            if lib_context and not params.get("num_ctx") and conn["type"] == "ollama":
+                params["num_ctx"] = context_size(lib_context, c["messages"])
             for step in range(steps + 1):
                 history = []
                 system = (c["params"].get("system") or "").strip()
+                if lib_context:
+                    system = (system + "\n\n" if system else "") + lib_context
                 if tools:
                     system = (system + "\n\n" if system else "") + web.SYSTEM_PROMPT
                 if system:
@@ -1003,7 +1040,7 @@ class App:
                         r["thinking"] += think
                     self.post("delta", c["id"])
 
-                calls, stats = prov.chat(model, history, c["params"], on_delta, cancel,
+                calls, stats = prov.chat(model, history, params, on_delta, cancel,
                                          tools=tools if step < steps else None,
                                          keep_alive=self.store.settings["defaults"].get("keep_alive") or None)
                 reply["stats"] = stats
@@ -1446,6 +1483,311 @@ class App:
             self.pull_var.set("")
             self.toast(msg)
             self.load_models_view()
+
+    # ── Library view ────────────────────────────────────────────────────
+    LIB_HINTS = {
+        "documents": "Reference material the AI can read: notes, specs, policies, code. Choose which documents "
+                     "a chat uses with the Library button in the chat header.",
+        "templates": "Examples of how answers should look. Use headings, tables and {{placeholders}}; the AI "
+                     "copies the layout and fills in the blanks. In Auto mode (the default) it sees every "
+                     "template and picks the one that fits the request.",
+    }
+
+    def build_library(self):
+        th, f = self.th, self.f
+        v = tk.Frame(self.main, bg=th["bg"])
+        _lab, tools = self.page_head(v, "Library", "Documents and templates · 書庫")
+        self.lib_tabs = {}
+        for key, name in (("documents", "Documents"), ("templates", "Templates")):
+            t = Tab(tools, th, f, name, lambda k=key: self.switch_library(k))
+            t.pack(side="left", padx=(0, 6))
+            self.lib_tabs[key] = t
+
+        body = tk.Frame(v, bg=th["bg"])
+        body.pack(fill="both", expand=True, padx=28, pady=(0, 18))
+
+        # left: the list of items
+        left = Panel(body, th, width=270)
+        left.pack(side="left", fill="y", padx=(0, 16))
+        left.pack_propagate(False)
+        lb = left.body
+        self.lib_count = tk.Label(lb, font=f["label"], bg=th["panel"], fg=th["dim"], anchor="w")
+        self.lib_count.pack(fill="x", pady=(0, 8))
+        row = tk.Frame(lb, bg=th["panel"])
+        row.pack(side="bottom", fill="x", pady=(10, 0))
+        Btn(row, th, f, "New", self.lib_new, kind="primary", small=True).pack(side="left")
+        Btn(row, th, f, "Import…", self.lib_import, small=True).pack(side="left", padx=6)
+        Btn(row, th, f, "Folder", self.lib_open_folder, small=True).pack(side="left")
+        wrap = tk.Frame(lb, bg=th["panel_2"], highlightthickness=1, highlightbackground=th["line"])
+        wrap.pack(fill="both", expand=True)
+        self.lib_list = tk.Listbox(wrap, bg=th["panel_2"], fg=th["text"], font=f["label"], relief="flat", bd=0,
+                                   highlightthickness=0, activestyle="none", exportselection=False,
+                                   selectbackground=th["wash"] if th["name"] != "glass" else th["sel"],
+                                   selectforeground=th["text"] if th["name"] != "glass" else th["on_sel"])
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.lib_list.yview, style="Ink.Vertical.TScrollbar")
+        self.lib_list.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.lib_list.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+        self.lib_list.bind("<<ListboxSelect>>", self.lib_select)
+
+        # right: the editor
+        right = Panel(body, th)
+        right.pack(side="left", fill="both", expand=True)
+        rb = right.body
+        self.lib_hint = tk.Label(rb, font=f["small"], bg=th["panel"], fg=th["faint"], justify="left", anchor="w")
+        self.lib_hint.pack(fill="x", pady=(0, 10))
+        self.lib_hint.bind("<Configure>", lambda e: self.lib_hint.configure(wraplength=max(e.width - 6, 200)))
+        tk.Label(rb, text="Name", font=f["label"], bg=th["panel"], fg=th["dim"]).pack(anchor="w")
+        self.lib_name = tk.StringVar()
+        entry(rb, th, f, textvariable=self.lib_name).pack(fill="x", ipady=4, pady=(4, 10))
+        bar = tk.Frame(rb, bg=th["panel"])
+        bar.pack(side="bottom", fill="x", pady=(10, 0))
+        Btn(bar, th, f, "Delete", self.lib_delete, kind="danger").pack(side="left")
+        self.lib_status = tk.Label(bar, font=f["small"], bg=th["panel"], fg=th["faint"])
+        self.lib_status.pack(side="left", padx=12)
+        Btn(bar, th, f, "Save", self.lib_save, kind="primary").pack(side="right")
+        self.lib_text = tk.Text(rb, bg=th["input"], fg=th["text"], insertbackground=th["accent"], relief="flat",
+                                font=f["mono"], wrap="word", padx=12, pady=10, undo=True, highlightthickness=1,
+                                highlightbackground=th["line_2"], highlightcolor=th["accent"],
+                                selectbackground=th["accent"], selectforeground=th["on_accent"])
+        self.lib_text.pack(fill="both", expand=True)
+        self.lib_text.bind("<<Modified>>", self.lib_modified)
+        self.lib_name.trace_add("write", lambda *a: self.lib_mark_dirty())
+        self.lib_text.bind("<Control-s>", lambda e: (self.lib_save(), "break")[1])
+        self.lib_dirty = False
+        return v
+
+    def switch_library(self, kind):
+        if kind == self.lib_kind or not self.lib_confirm_leave():
+            return
+        self.lib_kind = kind
+        self.lib_current = None
+        self.load_library()
+
+    def load_library(self, select=None):
+        th = self.th
+        kind = self.lib_kind
+        for k, t in self.lib_tabs.items():
+            t.set_active(k == kind)
+        self.lib_hint.configure(text=self.LIB_HINTS[kind])
+        names = self.library.names(kind)
+        self.lib_list.delete(0, "end")
+        for n in names:
+            self.lib_list.insert("end", "  " + n)
+        label = "document" if kind == "documents" else "template"
+        self.lib_count.configure(text="%d %s%s" % (len(names), label, "" if len(names) == 1 else "s"))
+        name = select or self.lib_current
+        if name not in names:
+            name = names[0] if names else None
+        if name:
+            i = names.index(name)
+            self.lib_list.selection_clear(0, "end")
+            self.lib_list.selection_set(i)
+            self.lib_list.see(i)
+        self.lib_open(name)
+        self.lib_status.configure(text="", fg=th["faint"])
+
+    def lib_open(self, name):
+        self.lib_current = name
+        self._lib_filling = True
+        self.lib_name.set(name or "")
+        self.lib_text.delete("1.0", "end")
+        if name:
+            self.lib_text.insert("1.0", self.library.read(self.lib_kind, name))
+        self.lib_text.edit_reset()
+        self.lib_text.edit_modified(False)
+        self._lib_filling = False
+        self.lib_dirty = False
+
+    def lib_modified(self, _e=None):
+        if self.lib_text.edit_modified():
+            self.lib_mark_dirty()
+
+    def lib_mark_dirty(self):
+        if getattr(self, "_lib_filling", False):
+            return
+        self.lib_dirty = True
+        self.lib_status.configure(text="Unsaved changes", fg=self.th["faint"])
+
+    def lib_confirm_leave(self):
+        """Offer to save before the open item is replaced. False means stay put."""
+        if not getattr(self, "lib_dirty", False):
+            return True
+        ans = messagebox.askyesnocancel("Unsaved changes", "Save changes to %s?" % (
+            self.lib_name.get().strip() or "this item"), parent=self.root)
+        if ans is None:
+            return False
+        if ans:
+            return self.lib_save()
+        self.lib_dirty = False
+        return True
+
+    def lib_select(self, _e=None):
+        sel = self.lib_list.curselection()
+        if not sel:
+            return
+        name = self.lib_list.get(sel[0]).strip()
+        if name == self.lib_current:
+            return
+        if not self.lib_confirm_leave():
+            names = self.library.names(self.lib_kind)
+            self.lib_list.selection_clear(0, "end")
+            if self.lib_current in names:
+                self.lib_list.selection_set(names.index(self.lib_current))
+            return
+        self.lib_open(name)
+
+    def lib_save(self):
+        kind, name = self.lib_kind, self.lib_name.get().strip()
+        text = self.lib_text.get("1.0", "end-1c")
+        try:
+            if self.lib_current and name != self.lib_current:
+                name = self.library.rename(kind, self.lib_current, name)
+                self.rename_in_chats(kind, self.lib_current, name)
+            name = self.library.save(kind, name, text)
+        except (OSError, ValueError) as e:
+            self.lib_status.configure(text=str(e), fg=self.th["red"])
+            return False
+        self.lib_dirty = False
+        self.lib_current = name
+        self.load_library(select=name)
+        self.lib_status.configure(text="Saved", fg=self.th["green"])
+        self.render_library_btn()
+        return True
+
+    def lib_new(self):
+        if not self.lib_confirm_leave():
+            return
+        base = "New document" if self.lib_kind == "documents" else "New template"
+        names, name, n = set(self.library.names(self.lib_kind)), base + ".md", 2
+        while name in names:
+            name, n = "%s %d.md" % (base, n), n + 1
+        self.library.save(self.lib_kind, name, "")
+        self.lib_current = name
+        self.load_library(select=name)
+        self.lib_text.focus_set()
+
+    def lib_import(self):
+        if not self.lib_confirm_leave():
+            return
+        paths = filedialog.askopenfilenames(parent=self.root, title="Import into the library", filetypes=TEXT_TYPES)
+        last, errors = None, []
+        for p in paths:
+            try:
+                last = self.library.import_file(self.lib_kind, p)
+            except Exception as e:
+                errors.append("%s: %s" % (os.path.basename(p), e))
+        if last:
+            self.lib_current = last
+            self.load_library(select=last)
+        if errors:
+            self.toast("Couldn't import " + "; ".join(errors), bad=True)
+        elif paths:
+            self.toast("Imported %d file%s" % (len(paths), "" if len(paths) == 1 else "s"))
+
+    def lib_delete(self):
+        name = self.lib_current
+        if not name or not messagebox.askyesno("Delete", 'Delete "%s" from the library?' % name, parent=self.root):
+            return
+        self.library.delete(self.lib_kind, name)
+        self.lib_current = None
+        self.lib_dirty = False
+        self.load_library()
+        self.render_library_btn()
+
+    def lib_open_folder(self):
+        path = self.library.dir(self.lib_kind)
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # noqa: S606 - opens the user's own data folder
+            else:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path])
+        except (OSError, AttributeError):
+            self.dialog("Library folder", path)
+
+    def rename_in_chats(self, kind, old, new):
+        changed = False
+        for c in self.store.chats:
+            if kind == "documents" and old in c.get("docs", []):
+                c["docs"] = [new if d == old else d for d in c["docs"]]
+                changed = True
+            if kind == "templates" and c.get("template") == old:
+                c["template"] = new
+                changed = True
+        if changed:
+            self.store.save_chats()
+
+    def context_dialog(self):
+        """Choose which Library documents and template the current chat uses."""
+        th, f = self.th, self.f
+        c = self.active() or self.new_chat()
+        docs, temps = self.library.names("documents"), self.library.names("templates")
+        d = tk.Toplevel(self.root, bg=th["panel_2"])
+        d.title("Library for this chat")
+        d.transient(self.root)
+        d.resizable(False, False)
+        if th["ticks"]:
+            tk.Frame(d, bg=th["accent"], height=3, width=34).place(x=18, y=0)
+        body = tk.Frame(d, bg=th["panel_2"])
+        body.pack(padx=24, pady=20, fill="both")
+
+        def heading(text, pad=0):
+            tk.Label(body, text=themes.case(th, text), font=f["h2"], bg=th["panel_2"], fg=th["text"]).pack(
+                anchor="w", pady=(pad, 4))
+
+        def note(text):
+            tk.Label(body, text=text, font=f["small"], bg=th["panel_2"], fg=th["faint"], justify="left",
+                     wraplength=440).pack(anchor="w", pady=(0, 6))
+
+        heading("Documents")
+        note("The AI reads the documents you tick, in this chat only.")
+        doc_vars = {}
+        box = ScrollFrame(body, th, bg=th["panel_2"])
+        box.canvas.configure(height=min(max(len(docs), 1), 8) * 28, width=440)
+        box.pack(fill="x")
+        for name in docs:
+            var = tk.BooleanVar(value=name in c.get("docs", []))
+            tk.Checkbutton(box.inner, text=name, variable=var, font=f["label"], bg=th["panel_2"], fg=th["text"],
+                           selectcolor=th["input"], activebackground=th["panel_2"], activeforeground=th["text"],
+                           highlightthickness=0, anchor="w").pack(fill="x")
+            doc_vars[name] = var
+        if not docs:
+            tk.Label(box.inner, text="No documents yet. Add some on the Library page.", font=f["label"],
+                     bg=th["panel_2"], fg=th["dim"]).pack(anchor="w")
+
+        heading("Template", 14)
+        note("Auto lets the AI see every template and use the one that fits the request.")
+        tvar = tk.StringVar(value=c.get("template", "auto") if c.get("template", "auto") in
+                            ["auto", ""] + temps else "auto")
+        opts = [("Auto: pick the matching template", "auto"), ("None", "")] + [(t, t) for t in temps]
+        for label, val in opts:
+            tk.Radiobutton(body, text=label, value=val, variable=tvar, font=f["label"], bg=th["panel_2"],
+                           fg=th["text"], selectcolor=th["input"], activebackground=th["panel_2"],
+                           activeforeground=th["text"], highlightthickness=0, anchor="w").pack(fill="x")
+
+        def apply():
+            c["docs"] = [n for n, v in doc_vars.items() if v.get()]
+            c["template"] = tvar.get()
+            self.store.save_chats()
+            self.render_library_btn()
+            d.destroy()
+
+        def manage():
+            d.destroy()
+            self.show_view("library")
+
+        row = tk.Frame(body, bg=th["panel_2"])
+        row.pack(fill="x", pady=(16, 0))
+        Btn(row, th, f, "Open Library", manage).pack(side="left")
+        Btn(row, th, f, "Done", apply, kind="primary").pack(side="right")
+        Btn(row, th, f, "Cancel", d.destroy).pack(side="right", padx=8)
+        d.bind("<Escape>", lambda e: d.destroy())
+        d.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - d.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - d.winfo_height()) // 3
+        d.geometry("+%d+%d" % (max(x, 0), max(y, 0)))
+        d.grab_set()
+        d.focus_set()
 
     # ── Settings view ───────────────────────────────────────────────────
     def build_settings(self):

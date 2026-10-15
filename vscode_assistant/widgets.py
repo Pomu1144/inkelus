@@ -102,6 +102,11 @@ class NavItem(tk.Canvas):
                                                          x, y + 4, x, y - 4, outline=col, fill="", width=1.4),
                                         c.create_line(x, y - 4, x + 7, y, x + 14, y - 4, fill=col, width=1.2),
                                         c.create_line(x + 7, y, x + 7, y + 8, fill=col, width=1.2)),
+        "library": lambda c, x, y, col: (c.create_rectangle(x + 1, y - 8, x + 12, y + 7, outline=col, width=1.4),
+                                         c.create_line(x + 4, y - 3, x + 9, y - 3, fill=col, width=1.2),
+                                         c.create_line(x + 4, y + 1, x + 9, y + 1, fill=col, width=1.2),
+                                         c.create_line(x + 15, y - 5, x + 15, y + 10, x + 4, y + 10,
+                                                       fill=col, width=1.4)),
         "settings": lambda c, x, y, col: (c.create_oval(x + 3, y - 4, x + 11, y + 4, outline=col, width=1.4),
                                           [c.create_line(x + 7 + dx * 5, y + dy * 5, x + 7 + dx * 8, y + dy * 8,
                                                          fill=col, width=1.4)

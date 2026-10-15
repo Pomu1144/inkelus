@@ -106,6 +106,8 @@ class Store:
             "id": new_id(), "title": "New conversation", "titled": False,
             "model": model or self.settings.get("last_model", ""),
             "browser": False,
+            "docs": [],               # Library documents shared with the model
+            "template": "auto",       # "auto", "" (none) or a template name
             "params": {"system": self.settings["defaults"].get("system", ""), "temperature": 0.7,
                        "top_p": 0.9, "num_ctx": None, "max_tokens": None},
             "messages": [], "updated": time.time(),
