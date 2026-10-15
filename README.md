@@ -54,7 +54,7 @@ Then start [Ollama](https://ollama.com) and pull a model from the
   - Pull new models with a progress bar, and delete models.
 - **Multiple servers**: Ollama, plus OpenAI-compatible servers (LM Studio,
   llama.cpp `llama-server`, vLLM, LocalAI, Jan…). Models from every server
-  appear in one picker.
+  appear in one picker under **Settings › Model**.
 
 ## Web sandbox
 

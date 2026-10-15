@@ -475,13 +475,8 @@ class App:
         self.title_lab.configure(cursor="xterm")
         self.title_lab.bind("<Button-1>", lambda e: self.rename_chat())
 
-        pick = tk.Frame(tools, bg=th["panel_2"], highlightthickness=1, highlightbackground=th["line_2"])
-        pick.pack(side="left", padx=(0, 8))
-        tk.Label(pick, text="MODEL", font=f["sub"], bg=th["panel_2"], fg=th["faint"]).pack(side="left", padx=(12, 4))
-        self.model_var = tk.StringVar()
-        self.model_box = ttk.Combobox(pick, textvariable=self.model_var, state="readonly", width=24, font=f["body"])
-        self.model_box.pack(side="left", padx=(0, 4), pady=2)
-        self.model_box.bind("<<ComboboxSelected>>", self.on_model_pick)
+        # the model picker lives in Settings; it's built there
+        self.model_box = None
         self.model_values = []
 
         self.browser_chip = tk.Label(tools, font=f["label"], padx=12, pady=6, cursor="hand2", highlightthickness=1)
@@ -491,16 +486,6 @@ class App:
         self.params_btn.pack(side="left", padx=(0, 8), fill="y")
         Btn(tools, th, f, "Export", lambda: self.export_chat(self.active()), small=True).pack(side="left", fill="y")
         self.title_lab.bind("<Configure>", lambda e: self.render_title(), add="+")
-        char_px = tkfont.Font(root=self.root, font=f["body"]).measure("0")
-
-        def fit_picker(e):
-            # on narrow windows the model picker gives up width so every button stays whole
-            others = tools.winfo_reqwidth() - self.model_box.winfo_reqwidth()
-            chars = max(10, min(24, (e.width - others - 40) // max(char_px, 1)))
-            if int(self.model_box.cget("width")) != chars:
-                self.model_box.configure(width=chars)
-
-        self.chat_head.bind("<Configure>", fit_picker, add="+")
 
         # parameters drawer
         self.params = Panel(v, th)
@@ -780,6 +765,8 @@ class App:
 
     # model picker
     def render_model_box(self):
+        if self.model_box is None:
+            return
         values, labels = [], []
         for cn in self.store.settings["connections"]:
             for m in self.models.get(cn["id"]) or []:
@@ -804,12 +791,14 @@ class App:
         c = self.active()
         if c and c.get("model"):
             return c["model"]
-        i = self.model_box.current() if hasattr(self, "model_box") else -1
+        i = self.model_box.current() if self.model_box is not None else -1
         if 0 <= i < len(self.model_values):
             return self.model_values[i]
         return self.store.settings.get("last_model", "")
 
     def on_model_pick(self, _e=None):
+        if self.model_box is None:
+            return
         i = self.model_box.current()
         if 0 <= i < len(self.model_values):
             v = self.model_values[i]
@@ -865,7 +854,7 @@ class App:
             c.create_text(cx, cy + 128, text="L O C A L   M O D E L S   ·   墨", font=f["sub"], fill=th["dim"],
                           tags="empty")
             c.create_line(cx - 40, cy + 146, cx + 40, cy + 146, fill=th["line_2"], tags="empty")
-        c.create_text(cx, cy + 172, text="Pick a model above and start writing. Turn on Web to let it search and "
+        c.create_text(cx, cy + 172, text="Pick a model in Settings and start writing. Turn on Web to let it search and "
                                          "read pages in a sandbox.", font=f["body"], fill=th["dim"], tags="empty", width=520,
                       justify="center")
         self.empty_items = True
@@ -1477,6 +1466,16 @@ class App:
             lab.bind("<Configure>", lambda e: lab.configure(wraplength=max(e.width - 6, 200)))
             return lab
 
+        # model
+        p = Panel(body, th, "Model", f)
+        p.pack(fill="x", pady=(0, 16), padx=(0, 16))
+        self.model_var = tk.StringVar()
+        self.model_box = ttk.Combobox(p.body, textvariable=self.model_var, state="readonly", font=f["body"])
+        self.model_box.pack(fill="x")
+        self.model_box.bind("<<ComboboxSelected>>", self.on_model_pick)
+        hint(p.body, "Used by the current chat and by new chats. Add or pull models on the Models page.")
+        self.render_model_box()
+
         # style
         p = Panel(body, th, "Interface style", f)
         p.pack(fill="x", pady=(0, 16), padx=(0, 16))
@@ -1573,6 +1572,7 @@ class App:
 
     def fill_settings(self):
         s = self.store.settings
+        self.render_model_box()
         for k, t in self.style_tabs.items():
             t.set_active(k == s.get("style", themes.DEFAULT_STYLE))
         ws = s["web"]
