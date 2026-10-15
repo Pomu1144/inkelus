@@ -1,4 +1,4 @@
-"""Inkelus — a desktop chat app for local LLMs, with a built-in sandbox browser.
+"""VSCode Assistant — a desktop chat app for local LLMs, with a built-in sandbox browser.
 
 Pure Python: tkinter + the standard library. Network calls run on worker
 threads and report back to the Tk thread through a queue.
@@ -18,6 +18,7 @@ from . import mdtk, net, providers, theme as themes, web
 from .store import Store, new_id
 from .widgets import (Btn, NavItem, Panel, ScrollFrame, Slip, Tab, bind_wheel, entry, style_ttk, textbox)
 
+APP_NAME = "VSCode Assistant"
 ASSETS = themes.ASSETS
 TOOL_RESULT_LIMIT = 15000
 
@@ -130,7 +131,9 @@ class MessageView(tk.Frame):
         if role == "tool":
             self._tool(head)
             return
-        who = "YOU" if role == "user" else (split_model(msg.get("model"))[1] or "MODEL").upper()
+        who = "You" if role == "user" else (split_model(msg.get("model"))[1] or "Model")
+        if th["name"] != "pro":
+            who = who.upper()
         dot = tk.Canvas(head, width=10, height=10, bg=th["bg"], highlightthickness=0)
         dot.create_polygon(5, 1, 9, 5, 5, 9, 1, 5, fill=th["sel"] if role == "user" else th["accent"])
         dot.pack(side="left", padx=(0, 6))
@@ -144,7 +147,7 @@ class MessageView(tk.Frame):
                 acts.append(("Retry", "regen"))
             acts.append(("Delete", "delete"))
             for label, act in reversed(acts):
-                b = tk.Label(head, text=label.upper(), font=f["sub"], bg=th["bg"], fg=th["faint"], cursor="hand2",
+                b = tk.Label(head, text=label if th["name"] == "pro" else label.upper(), font=f["sub"], bg=th["bg"], fg=th["faint"], cursor="hand2",
                              padx=6)
                 b.pack(side="right")
                 b.bind("<Button-1>", lambda e, a=act: app.message_action(a, idx))
@@ -163,7 +166,7 @@ class MessageView(tk.Frame):
         bubble.pack(fill="x")
         edge = tk.Frame(bubble, bg=th["red"] if err else (th["sel"] if is_user else th["panel"]), width=2)
         edge.pack(side="left", fill="y")
-        if not is_user and not err:
+        if not is_user and not err and th["ticks"]:
             tk.Frame(bubble, bg=th["accent"], height=2, width=24).place(x=14, y=0)
         self.text = tk.Text(bubble, bg=bubble["bg"], fg=th["red"] if err else th["text"], font=f["body"],
                             relief="flat", wrap="word", padx=16, pady=12, height=1, width=10, bd=0,
@@ -227,7 +230,7 @@ class MessageView(tk.Frame):
             think, body, open_ = split_think(m.get("content", ""))
             think = "\n".join(x for x in (m.get("thinking", "").strip(), think) if x)
             if think:
-                t.insert("end", "R E A S O N I N G\n", "thinkhead")
+                t.insert("end", self.app.spaced("Reasoning") + "\n", "thinkhead")
                 shown = think if (live and (open_ or not body.strip())) or len(think) < 600 else think[:600] + "…"
                 t.insert("end", shown + "\n\n", "think")
             mdtk.render(t, body, th, self.app.f)
@@ -255,7 +258,7 @@ class App:
     def __init__(self):
         themes.register_fonts()
         self.root = tk.Tk()
-        self.root.title("Inkelus")
+        self.root.title(APP_NAME)
         self.root.geometry("1280x820")
         self.root.minsize(860, 600)
         self.store = Store()
@@ -268,7 +271,7 @@ class App:
         self.pull_cancel = None
         self._last_paint = 0
         try:
-            self.icon = tk.PhotoImage(file=os.path.join(ASSETS, "enso_small.png"))
+            self.icon = tk.PhotoImage(file=os.path.join(ASSETS, "icon.png"))
             self.root.iconphoto(True, self.icon)
         except tk.TclError:
             pass
@@ -281,17 +284,24 @@ class App:
     def build(self):
         for w in self.root.winfo_children():
             w.destroy()
-        style = self.store.settings.get("style", "ink")
-        self.th = themes.STYLES.get(style, themes.INK)
+        style = self.store.settings.get("style", themes.DEFAULT_STYLE)
+        if style not in themes.STYLES:
+            style = themes.DEFAULT_STYLE
+        self.th = themes.STYLES[style]
         self.f = themes.fonts_for(style, set(tkfont.families(self.root)))
         self.label_font = tkfont.Font(root=self.root, font=self.f["label"])
         self.title_font = tkfont.Font(root=self.root, font=self.f["title"])
         th = self.th
         self.root.configure(bg=th["bg"])
         style_ttk(self.root, th, self.f)
-        self.bg_img = tk.PhotoImage(file=os.path.join(ASSETS, "bg_ink.png"))
-        self.enso = tk.PhotoImage(file=os.path.join(ASSETS, "enso.png"))
-        self.enso_small = tk.PhotoImage(file=os.path.join(ASSETS, "enso_small.png"))
+        if th["ornate"]:
+            self.bg_img = tk.PhotoImage(file=os.path.join(ASSETS, "bg_ink.png"))
+            self.logo = tk.PhotoImage(file=os.path.join(ASSETS, "enso.png"))
+            self.logo_small = tk.PhotoImage(file=os.path.join(ASSETS, "enso_small.png"))
+        else:
+            self.bg_img = None
+            self.logo = tk.PhotoImage(file=os.path.join(ASSETS, "logo.png"))
+            self.logo_small = tk.PhotoImage(file=os.path.join(ASSETS, "logo_small.png"))
 
         self.rail = tk.Frame(self.root, bg=th["rail"], width=250)
         self.rail.pack(side="left", fill="y")
@@ -302,9 +312,6 @@ class App:
         self.build_rail()
         self.views = {"chat": self.build_chat(), "models": self.build_models(), "settings": self.build_settings()}
         self.show_view("chat")
-
-    def title_text(self, s):
-        return s if self.th["name"] == "ink" else s.upper()
 
     def page_head(self, parent, title, sub):
         th, f = self.th, self.f
@@ -320,8 +327,9 @@ class App:
         box.pack(side="left", fill="x", expand=True)
         lab = tk.Label(box, text=self.spaced(title), font=f["title"], bg=th["bg"], fg=th["text"], anchor="w", width=1)
         lab.pack(anchor="w", fill="x")
-        tk.Label(box, text=sub.upper(), font=f["sub"], bg=th["bg"], fg=th["dim"], anchor="w", width=1).pack(
-            anchor="w", fill="x")
+        if th["name"] != "pro":
+            tk.Label(box, text=sub.upper(), font=f["sub"], bg=th["bg"], fg=th["dim"], anchor="w", width=1).pack(
+                anchor="w", fill="x")
         state = {"stacked": None}
 
         def relayout(e):
@@ -343,17 +351,21 @@ class App:
 
     def spaced(self, s):
         """Ink titles use wide letter-spacing; Tk can't track, so add hair spaces."""
-        return " ".join(s) if self.th["name"] == "ink" else s.upper()
+        return " ".join(s) if self.th["ornate"] else themes.case(self.th, s)
 
     # ── Rail ────────────────────────────────────────────────────────────
     def build_rail(self):
         th, f, r = self.th, self.f, self.rail
         brand = tk.Frame(r, bg=th["rail"])
         brand.pack(fill="x", padx=18, pady=(18, 14))
-        tk.Label(brand, image=self.enso_small, bg=th["rail"]).pack(side="left")
-        tk.Label(brand, text="I N K E L U S" if th["name"] == "ink" else "INKELUS", font=f["brand"],
-                 bg=th["rail"], fg=th["dim"], justify="left").pack(side="left", padx=10)
-        self.new_btn = Slip(r, th, f, "New", self.new_chat, sub="新しい会話", width=214, height=50)
+        tk.Label(brand, image=self.logo_small, bg=th["rail"]).pack(side="left")
+        tk.Label(brand, text=APP_NAME if th["name"] == "pro" else self.spaced(APP_NAME.upper()), font=f["brand"],
+                 bg=th["rail"], fg=th["text"] if th["name"] == "pro" else th["dim"], justify="left").pack(
+            side="left", padx=10)
+        if th["name"] == "pro":
+            self.new_btn = Slip(r, th, f, "New chat", self.new_chat, width=214, height=34)
+        else:
+            self.new_btn = Slip(r, th, f, "New", self.new_chat, sub="新しい会話", width=214, height=50)
         self.new_btn.pack(padx=18, pady=(0, 10))
         self.nav = {}
         for key, label in (("chat", "Chat"), ("models", "Models"), ("settings", "Settings")):
@@ -410,7 +422,7 @@ class App:
             return
         for c in chats:
             active = c["id"] == self.active_id
-            bg = th["wash"] if active and th["name"] == "ink" else (th["panel_hi"] if active else th["rail"])
+            bg = th["wash"] if active and th["name"] != "glass" else (th["panel_hi"] if active else th["rail"])
             row = tk.Frame(inner, bg=bg, cursor="hand2")
             row.pack(fill="x")
             tk.Frame(row, bg=th["accent"] if active else bg, width=2).pack(side="left", fill="y")
@@ -523,7 +535,8 @@ class App:
         # composer (packed before transcript so it keeps its height)
         comp = tk.Frame(v, bg=th["panel"], highlightthickness=1, highlightbackground=th["line"])
         comp.pack(side="bottom", fill="x", padx=28, pady=(8, 18))
-        tk.Frame(comp, bg=th["accent"], height=2, width=24).place(x=14, y=0)
+        if th["ticks"]:
+            tk.Frame(comp, bg=th["accent"], height=2, width=24).place(x=14, y=0)
         self.attach_row = tk.Frame(comp, bg=th["panel"])
         self.attach_row.pack(fill="x", padx=14)
         self.prompt = tk.Text(comp, bg=th["panel"], fg=th["text"], insertbackground=th["accent"], relief="flat",
@@ -540,7 +553,8 @@ class App:
         Btn(bar, th, f, "Attach image", self.attach, small=True).pack(side="left")
         self.stats_lab = tk.Label(bar, text="", font=f["small"], bg=th["panel"], fg=th["faint"])
         self.stats_lab.pack(side="left", padx=12)
-        self.send_btn = Slip(bar, th, f, "Send", self.send, width=160, height=40)
+        self.send_btn = Slip(bar, th, f, "Send", self.send, width=110 if th["name"] == "pro" else 160,
+                             height=32 if th["name"] == "pro" else 40)
         self.send_btn.pack(side="right")
 
         # transcript: a canvas with the ink backdrop and a frame of messages
@@ -551,7 +565,7 @@ class App:
         c.configure(yscrollcommand=lambda a, b: (sb.set(a, b), self.place_backdrop()))
         sb.pack(side="right", fill="y")
         c.pack(side="left", fill="both", expand=True)
-        self.bg_item = c.create_image(0, 0, image=self.bg_img, anchor="ne")
+        self.bg_item = c.create_image(0, 0, image=self.bg_img, anchor="ne") if self.bg_img else None
         self.msg_frame = tk.Frame(c, bg=th["bg"])
         self.msg_win = c.create_window(0, 0, window=self.msg_frame, anchor="n")
         self.msg_frame.bind("<Configure>", lambda e: self.queue_scrollregion())
@@ -585,6 +599,8 @@ class App:
         self.place_backdrop()
 
     def place_backdrop(self):
+        if self.bg_item is None:
+            return
         c = self.scroll_canvas
         c.coords(self.bg_item, c.winfo_width(), c.canvasy(0))
         c.tag_lower(self.bg_item)
@@ -699,8 +715,7 @@ class App:
         c = self.active()
         on = bool(c and c.get("browser"))
         text = "Web · on" if on else "Web · off"
-        if th["name"] == "glass":
-            text = text.upper()
+        text = themes.case(th, text)
         if on:
             self.browser_chip.configure(text=text, bg=th["wash"] if th["name"] == "ink" else th["sel"],
                                         fg=th["accent_2"] if th["name"] == "ink" else th["on_sel"],
@@ -839,11 +854,17 @@ class App:
         if w < 10:
             w, h = 900, 500
         cx, cy = w / 2, h / 2 - 60
-        c.create_image(cx, cy, image=self.enso, tags="empty")
-        c.create_text(cx, cy + 96, text=self.spaced("Inkelus"), font=(f["title"][0], 22, "bold"),
-                      fill=th["text"], tags="empty")
-        c.create_text(cx, cy + 128, text="L O C A L   M O D E L S   ·   墨", font=f["sub"], fill=th["dim"], tags="empty")
-        c.create_line(cx - 40, cy + 146, cx + 40, cy + 146, fill=th["line_2"], tags="empty")
+        c.create_image(cx, cy, image=self.logo, tags="empty")
+        if th["name"] == "pro":
+            c.create_text(cx, cy + 80, text=APP_NAME, font=(f["title"][0], 20, "bold"), fill=th["text"], tags="empty")
+            c.create_text(cx, cy + 110, text="Chat with your local models", font=f["body"], fill=th["dim"],
+                          tags="empty")
+        else:
+            c.create_text(cx, cy + 96, text=self.spaced(APP_NAME), font=(f["title"][0], 22, "bold"),
+                          fill=th["text"], tags="empty")
+            c.create_text(cx, cy + 128, text="L O C A L   M O D E L S   ·   墨", font=f["sub"], fill=th["dim"],
+                          tags="empty")
+            c.create_line(cx - 40, cy + 146, cx + 40, cy + 146, fill=th["line_2"], tags="empty")
         c.create_text(cx, cy + 172, text="Pick a model above and start writing. Turn on Web to let it search and "
                                          "read pages in a sandbox.", font=f["body"], fill=th["dim"], tags="empty", width=520,
                       justify="center")
@@ -1061,7 +1082,7 @@ class App:
         tk.Frame(d, bg=th["accent"], height=3, width=34).place(x=18, y=0)
         body = tk.Frame(d, bg=th["panel_2"])
         body.pack(padx=24, pady=20, fill="both")
-        tk.Label(body, text=self.title_text("Allow web action?"), font=f["h2"], bg=th["panel_2"],
+        tk.Label(body, text=themes.case(self.th, "Allow web action?"), font=f["h2"], bg=th["panel_2"],
                  fg=th["text"]).pack(anchor="w")
         tk.Label(body, text="The model wants to use the sandbox browser (read-only):", font=f["label"], bg=th["panel_2"],
                  fg=th["dim"]).pack(anchor="w", pady=(6, 8))
@@ -1225,7 +1246,7 @@ class App:
         def table(title, sub, cols, height):
             hdr = tk.Frame(body, bg=th["bg"])
             hdr.pack(fill="x", pady=(4, 8))
-            tk.Label(hdr, text=self.title_text(title), font=f["h2"], bg=th["bg"], fg=th["text"]).pack(side="left")
+            tk.Label(hdr, text=themes.case(self.th, title), font=f["h2"], bg=th["bg"], fg=th["text"]).pack(side="left")
             tk.Label(hdr, text=sub.upper(), font=f["sub"], bg=th["bg"], fg=th["dim"]).pack(side="left", padx=12)
             panel = tk.Frame(body, bg=th["panel_2"], highlightthickness=1, highlightbackground=th["line"])
             panel.pack(fill="x", pady=(0, 6), padx=(0, 16))
@@ -1397,7 +1418,7 @@ class App:
         if not name or not conn:
             return
         cancel = self.pull_cancel = threading.Event()
-        self.pull_btn.configure(text="Cancel" if self.th["name"] == "ink" else "CANCEL")
+        self.pull_btn.configure(text=themes.case(self.th, "Cancel"))
         self.pull_bar.pack(fill="x", pady=(12, 0), before=self.pull_status)
         self.pull_bar["value"] = 0
         self.pull_status.configure(text="Starting…")
@@ -1429,7 +1450,7 @@ class App:
 
     def _pull_done(self, msg, ok):
         self.pull_cancel = None
-        self.pull_btn.configure(text="Pull" if self.th["name"] == "ink" else "PULL")
+        self.pull_btn.configure(text=themes.case(self.th, "Pull"))
         self.pull_status.configure(text=msg)
         self.root.after(1500, lambda: self.pull_cancel is None and self.pull_bar.pack_forget())
         if ok:
@@ -1462,17 +1483,18 @@ class App:
         row = tk.Frame(p.body, bg=th["panel"])
         row.pack(anchor="w")
         self.style_tabs = {}
-        for key, name in (("ink", "Ink"), ("glass", "Glass")):
+        for key, name in (("pro", "Professional"), ("ink", "Ink"), ("glass", "Glass")):
             t = Tab(row, th, f, name, lambda k=key: self.set_style(k))
             t.pack(side="left", padx=(0, 6))
             self.style_tabs[key] = t
-        hint(p.body, "Ink: charcoal, cream paper and gold with serif type. "
+        hint(p.body, "Professional: neutral dark greys, a blue accent and clean sans type. "
+                     "Ink: charcoal, cream paper and gold with serif type. "
                      "Glass: dark slate tiles, condensed type and a yellow accent.")
 
         # web sandbox
         p = Panel(body, th, "Web sandbox", f)
         p.pack(fill="x", pady=(0, 16), padx=(0, 16))
-        hint(p.body, "Inkelus has its own built-in, read-only browser for the model. It is not BrowserOS and never "
+        hint(p.body, APP_NAME + " has its own built-in, read-only browser for the model. It is not BrowserOS and never "
                      "touches any browser on this computer: no cookies or logins, no JavaScript, no forms, "
                      "nothing saved to disk. It can search (DuckDuckGo), open pages, follow links and find text. "
                      "Turn it on per chat with the Web button in the chat header. Needs a model that supports "
@@ -1552,7 +1574,7 @@ class App:
     def fill_settings(self):
         s = self.store.settings
         for k, t in self.style_tabs.items():
-            t.set_active(k == s.get("style", "ink"))
+            t.set_active(k == s.get("style", themes.DEFAULT_STYLE))
         ws = s["web"]
         self._filling_web = True
         for key, var in self.web_vars.items():
@@ -1714,7 +1736,7 @@ class App:
 
     def export_all(self):
         path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".json",
-                                            initialfile="inkelus-backup.json", filetypes=[("JSON", "*.json")])
+                                            initialfile="vscode-assistant-backup.json", filetypes=[("JSON", "*.json")])
         if path:
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump({"version": 2, "chats": self.store.chats}, fh, ensure_ascii=False, indent=1)
@@ -1775,7 +1797,7 @@ class App:
         d.transient(self.root)
         d.geometry("680x520")
         tk.Frame(d, bg=th["accent"], height=3, width=34).place(x=18, y=0)
-        tk.Label(d, text=self.title_text(title), font=f["h2"], bg=th["panel_2"], fg=th["text"]).pack(
+        tk.Label(d, text=themes.case(self.th, title), font=f["h2"], bg=th["panel_2"], fg=th["text"]).pack(
             anchor="w", padx=24, pady=(20, 10))
         t = tk.Text(d, bg=th["code_bg"], fg=th["text"], font=f["mono"], relief="flat", padx=12, pady=10,
                     highlightthickness=0, wrap="word")

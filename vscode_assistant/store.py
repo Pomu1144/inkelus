@@ -1,7 +1,10 @@
 """Settings and conversations, saved as JSON in your user folder.
 
-Windows: %APPDATA%\\Inkelus    macOS: ~/Library/Application Support/Inkelus
-Linux:   ~/.config/inkelus    (override with INKELUS_HOME)
+Windows: %APPDATA%\\VSCode Assistant
+macOS:   ~/Library/Application Support/VSCode Assistant
+Linux:   ~/.config/vscode-assistant
+Override with VSCODE_ASSISTANT_HOME. An existing folder from when the app was
+called Inkelus is still used, so nothing is lost after the rename.
 """
 import json
 import os
@@ -11,21 +14,28 @@ import time
 import uuid
 
 
+def _platform_dir(name, linux_name):
+    if sys.platform == "win32":
+        return os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), name)
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/" + name)
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), linux_name)
+
+
 def data_dir():
-    if os.environ.get("INKELUS_HOME"):
-        d = os.environ["INKELUS_HOME"]
-    elif sys.platform == "win32":
-        d = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Inkelus")
-    elif sys.platform == "darwin":
-        d = os.path.expanduser("~/Library/Application Support/Inkelus")
-    else:
-        d = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "inkelus")
+    d = os.environ.get("VSCODE_ASSISTANT_HOME") or os.environ.get("INKELUS_HOME")
+    if not d:
+        d = _platform_dir("VSCode Assistant", "vscode-assistant")
+        legacy = _platform_dir("Inkelus", "inkelus")
+        if not os.path.isdir(d) and os.path.isdir(legacy):
+            d = legacy
     os.makedirs(d, exist_ok=True)
     return d
 
 
 DEFAULT_SETTINGS = {
-    "style": "ink",
+    "style": "pro",
+    "ui_version": 2,
     "connections": [{"id": "ollama", "name": "Ollama", "type": "ollama", "url": "http://localhost:11434", "key": ""}],
     "default_conn": "ollama",
     "last_model": "",
@@ -48,7 +58,10 @@ class Store:
         self.dir = data_dir()
         self.settings_path = os.path.join(self.dir, "settings.json")
         self.chats_path = os.path.join(self.dir, "chats.json")
-        self.settings = self._merge(DEFAULT_SETTINGS, self._load(self.settings_path, {}))
+        saved = self._load(self.settings_path, {})
+        if isinstance(saved, dict) and saved and saved.get("ui_version", 1) < 2:
+            saved["style"] = "pro"  # move pre-rename installs onto the new default look once
+        self.settings = self._merge(DEFAULT_SETTINGS, saved)
         self.chats = self._load(self.chats_path, [])
         if not isinstance(self.chats, list):
             self.chats = []

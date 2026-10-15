@@ -1,15 +1,15 @@
-"""Custom Tk widgets that carry the Ink / Glass look."""
+"""Custom Tk widgets that carry the Professional / Ink / Glass looks."""
 import sys
 import tkinter as tk
 from tkinter import ttk
 
-from .theme import mix
+from .theme import case, mix
 
 
 class Slip(tk.Canvas):
     """The main action. Ink: a cream paper slip with a clipped corner, Cinzel
     italic label, a rule and an arrow (NXBNVNB's ENTER button). Glass: a
-    yellow pill."""
+    yellow pill. Professional: a flat blue button with a centred label."""
 
     def __init__(self, master, theme, fonts, text, command, sub="", width=200, height=46):
         super().__init__(master, width=width, height=height, highlightthickness=0, bd=0,
@@ -39,6 +39,9 @@ class Slip(tk.Canvas):
         if w < 4:
             w, h = int(self["width"]), int(self["height"])
         th = self.theme
+        if th["name"] == "pro":
+            self._draw_flat(w, h, hover)
+            return
         if self.alt:  # "Stop": dark ink slip with gold text
             top, bot, fg = "#2a2620", "#1a1712", th["accent_2"]
             if th["name"] == "glass":
@@ -72,11 +75,25 @@ class Slip(tk.Canvas):
         if not self.enabled:
             self.create_rectangle(0, 0, w, h, fill=self["bg"], stipple="gray50", outline="")
 
+    def _draw_flat(self, w, h, hover):
+        th = self.theme
+        if self.alt:  # "Stop": a quiet secondary button
+            fill, line, fg = th["panel_hi"], th["line_2"], th["text"]
+        else:
+            fill, line, fg = th["accent"], th["accent"], th["on_accent"]
+        if hover:
+            fill = mix(fill, "#ffffff", 0.1)
+        self.create_rectangle(0, 0, w - 1, h - 1, fill=fill, outline=line)
+        self.create_text(w / 2, h / 2, text=self.text, font=self.fonts["slip"], fill=fg)
+        if not self.enabled:
+            self.create_rectangle(0, 0, w, h, fill=self["bg"], stipple="gray50", outline="")
+
 
 class NavItem(tk.Canvas):
     """A rail row. Active in Ink: gold wash fading right, 2px gold edge,
     hairlines top and bottom, a gold diamond on the left. Active in Glass: a
-    white block with dark text."""
+    white block with dark text. Active in Professional: a grey row with a
+    blue bar on the left edge."""
 
     ICONS = {
         "chat": lambda c, x, y, col: (c.create_line(x, y - 6, x + 14, y - 6, x + 14, y + 4, x + 5, y + 4, x, y + 8,
@@ -125,12 +142,18 @@ class NavItem(tk.Canvas):
             self.create_rectangle(0, 0, 1, h, fill=th["accent"], outline="")
             self.create_polygon(0, h / 2 - 5, 5, h / 2, 0, h / 2 + 5, fill=th["accent"], outline="")
             col = "#fff6dc"
+        elif self.active and th["name"] == "pro":
+            self.create_rectangle(0, 0, w, h, fill=th["wash"], outline="")
+            self.create_rectangle(0, 0, 1, h, fill=th["accent"], outline="")
+            col = th["text"]
         elif self.active:
             self.create_rectangle(12, 3, w - 12, h - 3, fill=th["sel"], outline="")
             col = th["on_sel"]
+        elif self.hover and th["name"] == "pro":
+            self.create_rectangle(0, 0, w, h, fill=mix(bg, "#ffffff", 0.04), outline="")
         x = 26
         self.ICONS[self.key](self, x, h / 2, col)
-        label = self.label if ink else self.label.upper()
+        label = case(th, self.label)
         self.create_text(x + 28, h / 2, text=label, anchor="w", font=self.fonts["nav"], fill=col)
 
 
@@ -145,7 +168,7 @@ class Btn(tk.Label):
             bg, fg, line = th["slip_bot"] if th["name"] == "ink" else th["accent"], th["on_accent"], th["accent"]
         elif kind == "danger":
             fg = th["red"]
-        super().__init__(master, text=text if th["name"] == "ink" else text.upper(), bg=bg, fg=fg,
+        super().__init__(master, text=case(th, text), bg=bg, fg=fg,
                          font=fonts["btn"] if not small else fonts["label"], padx=12 if small else 16,
                          pady=3 if small else 6, cursor="hand2", highlightthickness=1,
                          highlightbackground=line, highlightcolor=line, **kw)
@@ -164,7 +187,7 @@ class Btn(tk.Label):
 class Tab(tk.Label):
     def __init__(self, master, theme, fonts, text, command):
         self.theme = theme
-        super().__init__(master, text=text if theme["name"] == "ink" else text.upper(), font=fonts["btn"],
+        super().__init__(master, text=case(theme, text), font=fonts["btn"],
                          padx=18, pady=5, cursor="hand2", highlightthickness=1)
         self.bind("<Button-1>", lambda e: command())
         self.set_active(False)
@@ -172,22 +195,23 @@ class Tab(tk.Label):
     def set_active(self, on):
         th = self.theme
         if on:
-            self.configure(bg=th["sel"], fg=th["on_sel"], highlightbackground=th["sel"])
+            self.configure(bg=th["sel"], fg=th["on_sel"],
+                           highlightbackground=th["accent"] if th["name"] == "pro" else th["sel"])
         else:
             self.configure(bg=th["panel_2"], fg=th["dim"], highlightbackground=th["line"])
 
 
 class Panel(tk.Frame):
-    """A dark tile with a hairline and the short gold tick top-left."""
+    """A dark tile with a hairline and (Ink / Glass) the short accent tick top-left."""
 
     def __init__(self, master, theme, title=None, fonts=None, **kw):
         super().__init__(master, bg=theme["panel"], highlightthickness=1, highlightbackground=theme["line"], **kw)
-        tick = tk.Frame(self, bg=theme["accent"], height=2, width=24)
-        tick.place(x=14, y=0)
+        if theme["ticks"]:
+            tk.Frame(self, bg=theme["accent"], height=2, width=24).place(x=14, y=0)
         self.body = tk.Frame(self, bg=theme["panel"])
         self.body.pack(fill="both", expand=True, padx=18, pady=(14, 16))
         if title:
-            tk.Label(self.body, text=title if theme["name"] == "ink" else title.upper(), font=fonts["h2"],
+            tk.Label(self.body, text=case(theme, title), font=fonts["h2"],
                      bg=theme["panel"], fg=theme["text"]).pack(anchor="w", pady=(0, 10))
 
 

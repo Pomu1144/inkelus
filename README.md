@@ -1,14 +1,19 @@
-# Inkelus
+# VSCode Assistant
 
 A desktop chat app for your local LLMs, written in pure Python. It uses only
 tkinter and the standard library: no pip installs, no Node, and no admin
 rights needed. It includes its own **sandbox browser**, so a model can search
 the web and read pages without touching any browser on your computer.
 
-It is styled after the **Ink** and **Glass** interface styles from NXBNVNB.
-Ink is charcoal ink, cream paper and gold, with serif type, thin square frames
-and a left rail where the active item gets a gold wash. Glass uses dark slate
-tiles, condensed type and a yellow accent. You switch between them in Settings.
+It has three interface styles, which you switch between in **Settings ›
+Interface style**:
+
+- **Professional** (the default): neutral dark editor greys, a blue accent,
+  clean sans type and flat controls.
+- **Ink**: charcoal ink, cream paper and gold, with serif type, thin square
+  frames and ink artwork (from NXBNVNB).
+- **Glass**: dark slate tiles, condensed type and a yellow accent (from
+  NXBNVNB).
 
 ## Run it
 
@@ -17,7 +22,7 @@ python run.py
 ```
 
 On Windows you can also double-click **`run.pyw`**, which opens without a
-console window. `python -m inkelus` works too.
+console window. `python -m vscode_assistant` works too.
 
 You need **Python 3.8+ with Tk**. The python.org installers for Windows and
 macOS include Tk. On Linux, install your distro's `python3-tk` package if
@@ -99,17 +104,19 @@ tool calls.
 
 ## Work laptops
 
-- **Nothing to install** beyond Python. The bundled fonts (Kaisei Tokumin,
-  Cinzel, Inter, Oswald) are loaded for this app's process only, not
+- **Nothing to install** beyond Python. The bundled fonts (Inter, Kaisei
+  Tokumin, Cinzel, Oswald) are loaded for this app's process only, not
   installed system-wide. If that's blocked, the app falls back to Georgia or
   Segoe UI.
 - **Corporate proxies**:
   - Requests to your model servers on `localhost` skip any `HTTP(S)_PROXY`
     setting.
   - The web sandbox goes through your proxy like any other app.
-- **Your data** stays in your user folder: `%APPDATA%\Inkelus` on Windows,
-  `~/Library/Application Support/Inkelus` on macOS, `~/.config/inkelus` on
-  Linux. Set `INKELUS_HOME` to use a different folder.
+- **Your data** stays in your user folder: `%APPDATA%\VSCode Assistant` on
+  Windows, `~/Library/Application Support/VSCode Assistant` on macOS,
+  `~/.config/vscode-assistant` on Linux. Set `VSCODE_ASSISTANT_HOME` to use a
+  different folder. If you used the app when it was called Inkelus, its
+  existing folder keeps being used, so your chats carry over.
 
 ## Keyboard
 
@@ -120,14 +127,14 @@ tool calls.
 ## Files
 
 ```
-run.py / run.pyw          start the app
-inkelus/app.py            window, views, chat + tool loop
-inkelus/providers.py      Ollama + OpenAI-compatible clients (streaming, tool calls)
-inkelus/web.py            the sandbox browser (read-only web tools)
-inkelus/mdtk.py           Markdown → Tk text renderer
-inkelus/widgets.py        Ink/Glass widgets: paper slip button, nav rail rows, panels
-inkelus/theme.py          Ink and Glass palettes, font loading
-inkelus/net.py            urllib helpers
-inkelus/store.py          settings + chats on disk
-inkelus/assets/           fonts and ink art from NXBNVNB
+run.py / run.pyw                 start the app
+vscode_assistant/app.py         window, views, chat + tool loop
+vscode_assistant/providers.py   Ollama + OpenAI-compatible clients (streaming, tool calls)
+vscode_assistant/web.py         the sandbox browser (read-only web tools)
+vscode_assistant/mdtk.py        Markdown → Tk text renderer
+vscode_assistant/widgets.py     styled widgets: main button, nav rail rows, panels
+vscode_assistant/theme.py       Professional, Ink and Glass palettes, font loading
+vscode_assistant/net.py         urllib helpers
+vscode_assistant/store.py       settings + chats on disk
+vscode_assistant/assets/        app icon, fonts, and ink art from NXBNVNB
 ```
