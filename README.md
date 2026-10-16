@@ -1,14 +1,19 @@
-# Inkelus
+# VSCode Assistant
 
 A desktop chat app for your local LLMs, written in pure Python. It uses only
 tkinter and the standard library: no pip installs, no Node, and no admin
 rights needed. It includes its own **sandbox browser**, so a model can search
 the web and read pages without touching any browser on your computer.
 
-It is styled after the **Ink** and **Glass** interface styles from NXBNVNB.
-Ink is charcoal ink, cream paper and gold, with serif type, thin square frames
-and a left rail where the active item gets a gold wash. Glass uses dark slate
-tiles, condensed type and a yellow accent. You switch between them in Settings.
+It has three interface styles, which you switch between in **Settings ›
+Interface style**:
+
+- **Professional** (the default): neutral dark editor greys, a blue accent,
+  clean sans type and flat controls.
+- **Ink**: charcoal ink, cream paper and gold, with serif type, thin square
+  frames and ink artwork (from NXBNVNB).
+- **Glass**: dark slate tiles, condensed type and a yellow accent (from
+  NXBNVNB).
 
 ## Run it
 
@@ -17,7 +22,7 @@ python run.py
 ```
 
 On Windows you can also double-click **`run.pyw`**, which opens without a
-console window. `python -m inkelus` works too.
+console window. `python -m vscode_assistant` works too.
 
 You need **Python 3.8+ with Tk**. The python.org installers for Windows and
 macOS include Tk. On Linux, install your distro's `python3-tk` package if
@@ -25,6 +30,35 @@ macOS include Tk. On Linux, install your distro's `python3-tk` package if
 
 Then start [Ollama](https://ollama.com) and pull a model from the
 **Models** screen, for example `qwen2.5:1.5b`.
+
+### In your browser (faster)
+
+```bash
+python run_web.py
+```
+
+On Windows you can double-click **`run_web.pyw`** instead. This starts a small
+server on your own computer (`http://127.0.0.1:8765`, never reachable from
+other machines) and opens the app in Chrome as its own window, or in Edge or
+your default browser if Chrome isn't installed. `python -m vscode_assistant
+--web` works too. Options:
+
+- `--tab`: open as a normal browser tab instead of an app window
+- `--no-open`: just start the server; open the printed address yourself
+- `--port 9000`: use a different port
+- `--keep-running`: don't stop when the last app window closes
+
+The browser version has everything the desktop window has: streaming chat,
+Markdown with copyable code blocks, the web sandbox, the Library, models and
+settings. It also adds a light theme, and you can paste or drag images into
+the message box. It uses the same data folder, so your chats, settings and
+Library are shared. Don't run both at the same time, or the one you close
+last overwrites the other's changes.
+
+The server stops by itself about 30 seconds after you close the last app
+window (unless a reply or a model download is still running). Launching it
+again while it's running just reopens the window. You can also press `Ctrl+C`
+in its console.
 
 ## Features
 
@@ -47,9 +81,39 @@ Then start [Ollama](https://ollama.com) and pull a model from the
   - Load or unload a model.
   - View a model's details: template, parameters, license, context length.
   - Pull new models with a progress bar, and delete models.
+- **Library**: a place to keep **documents** (reference material the AI
+  can read) and **templates** (examples of how answers should be laid out).
+  See [Library](#library) below.
 - **Multiple servers**: Ollama, plus OpenAI-compatible servers (LM Studio,
   llama.cpp `llama-server`, vLLM, LocalAI, Jan…). Models from every server
-  appear in one picker.
+  appear in one picker under **Settings › Model**.
+
+## Library
+
+Open **Library** in the left rail. It has two tabs:
+
+- **Documents**: notes, specs, policies, code, anything the AI should know
+  about. Create them in the editor, or click **Import…** to add text files
+  (`.txt`, `.md`, `.csv`, `.json`, source code…) or Word `.docx` files, which
+  are converted to text.
+- **Templates**: examples of how an answer should look. Write them with
+  headings, tables and `{{placeholders}}`; the AI copies the layout and fills
+  in the blanks. Three examples come with the app: meeting notes, a bug
+  report and an email.
+
+In a chat, click **Library** in the header to choose:
+
+- which **documents** the AI reads in that chat, and
+- which **template** it follows. **Auto** (the default) lets the AI see every
+  template and use the one that matches the request (ask for "a bug report
+  about…" and it uses *Bug report*). You can also pin one template, or choose
+  **None**.
+
+Documents and templates are plain files in the `documents` and `templates`
+folders inside your data folder (the **Folder** button opens it), so you can
+also edit them with any editor. With Ollama, the app enlarges the context
+window when documents are attached so they aren't cut off; set **Context
+(num_ctx)** under **Parameters** to choose it yourself.
 
 ## Web sandbox
 
@@ -99,17 +163,19 @@ tool calls.
 
 ## Work laptops
 
-- **Nothing to install** beyond Python. The bundled fonts (Kaisei Tokumin,
-  Cinzel, Inter, Oswald) are loaded for this app's process only, not
+- **Nothing to install** beyond Python. The bundled fonts (Inter, Kaisei
+  Tokumin, Cinzel, Oswald) are loaded for this app's process only, not
   installed system-wide. If that's blocked, the app falls back to Georgia or
   Segoe UI.
 - **Corporate proxies**:
   - Requests to your model servers on `localhost` skip any `HTTP(S)_PROXY`
     setting.
   - The web sandbox goes through your proxy like any other app.
-- **Your data** stays in your user folder: `%APPDATA%\Inkelus` on Windows,
-  `~/Library/Application Support/Inkelus` on macOS, `~/.config/inkelus` on
-  Linux. Set `INKELUS_HOME` to use a different folder.
+- **Your data** stays in your user folder: `%APPDATA%\VSCode Assistant` on
+  Windows, `~/Library/Application Support/VSCode Assistant` on macOS,
+  `~/.config/vscode-assistant` on Linux. Set `VSCODE_ASSISTANT_HOME` to use a
+  different folder. If you used the app when it was called Inkelus, its
+  existing folder keeps being used, so your chats carry over.
 
 ## Keyboard
 
@@ -120,14 +186,19 @@ tool calls.
 ## Files
 
 ```
-run.py / run.pyw          start the app
-inkelus/app.py            window, views, chat + tool loop
-inkelus/providers.py      Ollama + OpenAI-compatible clients (streaming, tool calls)
-inkelus/web.py            the sandbox browser (read-only web tools)
-inkelus/mdtk.py           Markdown → Tk text renderer
-inkelus/widgets.py        Ink/Glass widgets: paper slip button, nav rail rows, panels
-inkelus/theme.py          Ink and Glass palettes, font loading
-inkelus/net.py            urllib helpers
-inkelus/store.py          settings + chats on disk
-inkelus/assets/           fonts and ink art from NXBNVNB
+run.py / run.pyw                 start the app
+run_web.py / run_web.pyw        start the browser version
+vscode_assistant/app.py         the desktop window and its views
+vscode_assistant/server.py      the browser version: local web server + JSON API
+vscode_assistant/static/        the browser version's page, styles and scripts
+vscode_assistant/engine.py      the chat + tool loop, shared by both versions
+vscode_assistant/providers.py   Ollama + OpenAI-compatible clients (streaming, tool calls)
+vscode_assistant/web.py         the sandbox browser (read-only web tools)
+vscode_assistant/mdtk.py        Markdown → Tk text renderer
+vscode_assistant/widgets.py     styled widgets: main button, nav rail rows, panels
+vscode_assistant/theme.py       Professional, Ink and Glass palettes, font loading
+vscode_assistant/net.py         urllib helpers
+vscode_assistant/store.py       settings + chats on disk
+vscode_assistant/library.py     documents + templates, and the prompt text they add
+vscode_assistant/assets/        app icon, fonts, and ink art from NXBNVNB
 ```

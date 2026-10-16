@@ -1,7 +1,10 @@
-"""Colours and fonts for the two interface styles, ported from NXBNVNB.
+"""Colours and fonts for the three interface styles.
 
+pro    neutral dark editor greys, a blue accent, sans type, flat controls (default)
 ink    charcoal ink, cream paper and gold, serif type, thin square frames
 glass  dark slate tiles, white hairlines, condensed titles, a yellow accent
+
+Ink and Glass are ported from NXBNVNB.
 
 Tk has no translucency, so the "glass" alpha values from the CSS are baked
 into solid colours over the dark backdrop.
@@ -39,6 +42,8 @@ INK = {
     "wash": "#3b311d",        # active nav row: gold wash start
     "radius_square": True,
     "upper_titles": False,
+    "ornate": True,           # ink art, spaced titles, Japanese captions
+    "ticks": True,            # short accent tick on panel tops
 }
 
 GLASS = {
@@ -67,9 +72,42 @@ GLASS = {
     "wash": "#f4f4f1",
     "radius_square": False,
     "upper_titles": True,
+    "ornate": False,
+    "ticks": True,
 }
 
-STYLES = {"ink": INK, "glass": GLASS}
+PRO = {
+    "name": "pro",
+    "bg": "#1e1e1e",
+    "rail": "#181818",
+    "panel": "#252526",
+    "panel_2": "#202020",
+    "panel_hi": "#2b2d31",    # user turns
+    "input": "#2a2a2a",
+    "line": "#2e2e2e",
+    "line_2": "#3e3e42",
+    "text": "#e4e4e4",
+    "dim": "#a9a9a9",
+    "faint": "#767676",
+    "accent": "#0078d4",
+    "accent_2": "#4daafc",
+    "on_accent": "#ffffff",
+    "sel": "#04395e",
+    "on_sel": "#ffffff",
+    "slip_top": "#0078d4",
+    "slip_bot": "#0078d4",
+    "red": "#f14c4c",
+    "green": "#3fb950",
+    "code_bg": "#161616",
+    "wash": "#37373d",        # active list row
+    "radius_square": True,
+    "upper_titles": False,
+    "ornate": False,
+    "ticks": False,
+}
+
+STYLES = {"pro": PRO, "ink": INK, "glass": GLASS}
+DEFAULT_STYLE = "pro"
 
 
 def _register_fonts():
@@ -141,6 +179,14 @@ def fonts_for(style, available):
             "md_h1": (serif_b, 15, "bold"), "md_h2": (serif_b, 13, "bold"), "md_h3": (serif_b, 12, "bold"),
             "bold_family": serif_b,
         }
+    if style == "pro":
+        return {
+            "body": (sans, 10), "small": (sans, 8), "label": (sans, 9),
+            "title": (sans, 14, "bold"), "h2": (sans, 11, "bold"), "sub": (sans, 8), "brand": (sans, 10, "bold"),
+            "slip": (sans, 10, "bold"), "nav": (sans, 10), "btn": (sans, 9), "mono": (mono, 10),
+            "md_h1": (sans, 14, "bold"), "md_h2": (sans, 12, "bold"), "md_h3": (sans, 11, "bold"),
+            "bold_family": sans,
+        }
     return {
         "body": (sans, 10), "small": (sans, 8), "label": (sans, 9),
         "title": (cond, 19), "h2": (cond, 13), "sub": (cond, 8), "brand": (cond, 9),
@@ -148,6 +194,11 @@ def fonts_for(style, available):
         "md_h1": (sans, 14, "bold"), "md_h2": (sans, 12, "bold"), "md_h3": (sans, 11, "bold"),
         "bold_family": sans,
     }
+
+
+def case(theme, s):
+    """Glass sets labels in capitals; the other styles keep them as written."""
+    return s.upper() if theme["upper_titles"] else s
 
 
 def mix(c1, c2, t):
