@@ -31,6 +31,35 @@ macOS include Tk. On Linux, install your distro's `python3-tk` package if
 Then start [Ollama](https://ollama.com) and pull a model from the
 **Models** screen, for example `qwen2.5:1.5b`.
 
+### In your browser (faster)
+
+```bash
+python run_web.py
+```
+
+On Windows you can double-click **`run_web.pyw`** instead. This starts a small
+server on your own computer (`http://127.0.0.1:8765`, never reachable from
+other machines) and opens the app in Chrome as its own window, or in Edge or
+your default browser if Chrome isn't installed. `python -m vscode_assistant
+--web` works too. Options:
+
+- `--tab`: open as a normal browser tab instead of an app window
+- `--no-open`: just start the server; open the printed address yourself
+- `--port 9000`: use a different port
+- `--keep-running`: don't stop when the last app window closes
+
+The browser version has everything the desktop window has: streaming chat,
+Markdown with copyable code blocks, the web sandbox, the Library, models and
+settings. It also adds a light theme, and you can paste or drag images into
+the message box. It uses the same data folder, so your chats, settings and
+Library are shared. Don't run both at the same time, or the one you close
+last overwrites the other's changes.
+
+The server stops by itself about 30 seconds after you close the last app
+window (unless a reply or a model download is still running). Launching it
+again while it's running just reopens the window. You can also press `Ctrl+C`
+in its console.
+
 ## Features
 
 - **Chat**
@@ -158,7 +187,11 @@ tool calls.
 
 ```
 run.py / run.pyw                 start the app
-vscode_assistant/app.py         window, views, chat + tool loop
+run_web.py / run_web.pyw        start the browser version
+vscode_assistant/app.py         the desktop window and its views
+vscode_assistant/server.py      the browser version: local web server + JSON API
+vscode_assistant/static/        the browser version's page, styles and scripts
+vscode_assistant/engine.py      the chat + tool loop, shared by both versions
 vscode_assistant/providers.py   Ollama + OpenAI-compatible clients (streaming, tool calls)
 vscode_assistant/web.py         the sandbox browser (read-only web tools)
 vscode_assistant/mdtk.py        Markdown → Tk text renderer

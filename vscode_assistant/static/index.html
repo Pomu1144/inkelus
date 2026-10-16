@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="app-token" content="__TOKEN__">
+<title>__APP_NAME__</title>
+<link rel="icon" href="/assets/icon.png">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="app">
+  <aside class="rail">
+    <div class="brand"><img src="/assets/logo_small.png" alt="" width="24" height="24"><span>__APP_NAME__</span></div>
+    <button class="btn primary block" id="newChat">New chat</button>
+    <nav class="nav">
+      <a data-view="chat" class="active"><svg viewBox="0 0 16 16"><path d="M2 3h12v8H7l-4 3v-3H2z"/></svg>Chat</a>
+      <a data-view="models"><svg viewBox="0 0 16 16"><path d="M8 1.5l6 3.5v6l-6 3.5-6-3.5V5z M2 5l6 3.5L14 5 M8 8.5V14.5"/></svg>Models</a>
+      <a data-view="library"><svg viewBox="0 0 16 16"><path d="M3 1.5h8v11H3z M5 4.5h4 M5 7h4 M13 4v10.5H5"/></svg>Library</a>
+      <a data-view="settings"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15M3 3l1.8 1.8M11.2 11.2L13 13M3 13l1.8-1.8M11.2 4.8L13 3"/></svg>Settings</a>
+    </nav>
+    <div class="chats-head"><span>CHATS</span><input id="search" type="search" placeholder="Search" aria-label="Search chats"></div>
+    <div class="chat-list" id="chatList"></div>
+    <div class="status"><i id="statusDot"></i><span id="statusText">Connecting…</span></div>
+  </aside>
+
+  <main>
+    <!-- Chat -->
+    <section class="view" id="view-chat">
+      <header class="head">
+        <h1 id="chatTitle" title="Click to rename">New conversation</h1>
+        <div class="tools">
+          <button class="btn chip" id="webBtn" title="Let the model search and read web pages (read-only sandbox)">Web · off</button>
+          <button class="btn" id="libBtn">Library</button>
+          <button class="btn" id="paramsBtn">Parameters</button>
+          <button class="btn" id="exportBtn">Export</button>
+        </div>
+      </header>
+      <div class="params panel" id="params" hidden>
+        <label class="full">System prompt<textarea id="pSystem" rows="2"></textarea></label>
+        <label>Temperature <b id="pTempV"></b><input type="range" id="pTemp" min="0" max="2" step="0.05"></label>
+        <label>Top P <b id="pTopV"></b><input type="range" id="pTop" min="0" max="1" step="0.01"></label>
+        <label>Context (num_ctx)<input id="pCtx" inputmode="numeric" placeholder="model default"></label>
+        <label>Max tokens<input id="pMax" inputmode="numeric" placeholder="no limit"></label>
+      </div>
+      <div class="transcript" id="transcript">
+        <div class="empty" id="empty">
+          <img src="/assets/logo.png" alt="" width="88" height="88">
+          <h2>__APP_NAME__</h2>
+          <p class="dim">Chat with your local models</p>
+          <p class="dim small">Pick a model in Settings and start writing. Turn on Web to let it search and read pages in a sandbox.</p>
+        </div>
+        <div class="messages" id="messages"></div>
+      </div>
+      <form class="composer" id="composer">
+        <div class="attachments" id="attachments"></div>
+        <textarea id="prompt" rows="2" placeholder="Write to the model…   (Enter to send, Shift+Enter for a new line)"></textarea>
+        <div class="bar">
+          <label class="btn small"><input type="file" id="attach" accept="image/*" multiple hidden>Attach image</label>
+          <span class="faint small" id="stats"></span>
+          <button class="btn primary send" id="sendBtn" type="submit">Send</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Models -->
+    <section class="view" id="view-models" hidden>
+      <header class="head">
+        <h1>Models</h1>
+        <div class="tools">
+          <label class="picker"><span>SERVER</span><select id="mConn"></select></label>
+          <button class="btn" id="mRefresh">Refresh</button>
+        </div>
+      </header>
+      <div class="scroll">
+        <div class="panel" id="pullPanel">
+          <h3>Pull a model</h3>
+          <div class="row"><input id="pullName" placeholder="e.g. llama3.2, qwen2.5:7b, mistral-nemo"><button class="btn primary" id="pullBtn">Pull</button></div>
+          <progress id="pullBar" max="100" hidden></progress>
+          <p class="faint small" id="pullStatus"></p>
+        </div>
+        <h3 class="section">In memory <span class="faint small">RUNNING</span></h3>
+        <table class="table" id="runTable"><thead><tr><th>Model</th><th>Size</th><th>Memory</th><th>Context</th><th>Status</th><th></th></tr></thead><tbody></tbody></table>
+        <h3 class="section">Installed <span class="faint small">LIBRARY</span></h3>
+        <table class="table" id="libTable"><thead><tr><th>Model</th><th>Size</th><th>Quant</th><th>Family</th><th>On disk</th><th>Modified</th><th></th></tr></thead><tbody></tbody></table>
+      </div>
+    </section>
+
+    <!-- Library -->
+    <section class="view" id="view-library" hidden>
+      <header class="head">
+        <h1>Library</h1>
+        <div class="tools tabs">
+          <button class="tab active" data-kind="documents">Documents</button>
+          <button class="tab" data-kind="templates">Templates</button>
+        </div>
+      </header>
+      <div class="lib">
+        <div class="panel lib-list">
+          <div class="dim small" id="libCount"></div>
+          <ul id="libItems"></ul>
+          <div class="row">
+            <button class="btn primary small" id="libNew">New</button>
+            <label class="btn small"><input type="file" id="libImport" multiple hidden>Import…</label>
+          </div>
+          <p class="faint tiny" id="libFolder"></p>
+        </div>
+        <div class="panel lib-edit">
+          <p class="faint small" id="libHint"></p>
+          <label>Name<input id="libName"></label>
+          <textarea id="libText" spellcheck="false"></textarea>
+          <div class="row between">
+            <button class="btn danger" id="libDelete">Delete</button>
+            <span class="faint small" id="libStatus"></span>
+            <button class="btn primary" id="libSave">Save</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section class="view" id="view-settings" hidden>
+      <header class="head"><h1>Settings</h1></header>
+      <div class="scroll">
+        <div class="panel">
+          <h3>Model</h3>
+          <select id="sModel"></select>
+          <p class="faint small">Used by the current chat and by new chats. Add or pull models on the Models page.</p>
+        </div>
+        <div class="panel">
+          <h3>Appearance</h3>
+          <div class="tabs" id="themeTabs">
+            <button class="tab" data-theme="dark">Dark</button>
+            <button class="tab" data-theme="light">Light</button>
+            <button class="tab" data-theme="system">Match system</button>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>Web sandbox</h3>
+          <p class="faint small">__APP_NAME__ has its own built-in, read-only browser for the model. It never touches your real browser: no cookies or logins, no JavaScript, no forms, nothing saved to disk. Turn it on per chat with the Web button in the chat header. Needs a model that supports tool calling (e.g. qwen2.5, qwen3, llama3.1+, mistral-nemo).</p>
+          <label class="check"><input type="checkbox" data-web="confirm"> Ask before each page or search</label>
+          <label class="check"><input type="checkbox" data-web="allow_search"> Allow web search (DuckDuckGo)</label>
+          <label class="check"><input type="checkbox" data-web="allow_private"> Allow local and intranet addresses (localhost, 10.x, 192.168.x…)</label>
+          <label class="inline">Max web steps per reply <input id="webSteps" inputmode="numeric" size="4"></label>
+        </div>
+        <div class="panel">
+          <h3>Servers</h3>
+          <div id="connList"></div>
+          <form id="connForm" class="grid2">
+            <input type="hidden" id="cId">
+            <label>Name<input id="cName"></label>
+            <label>Type<select id="cType"><option value="ollama">Ollama</option><option value="openai">OpenAI-compatible</option></select></label>
+            <label class="full">Base URL<input id="cUrl" placeholder="http://localhost:11434"></label>
+            <label class="full">API key (optional)<input id="cKey" type="password" autocomplete="off"></label>
+            <div class="full row end"><button class="btn" type="button" id="cClear">Clear</button><button class="btn primary" type="submit">Save server</button></div>
+          </form>
+          <p class="faint small">Ollama: http://localhost:11434 · LM Studio: http://localhost:1234/v1 · llama.cpp: http://localhost:8080/v1 · vLLM: http://localhost:8000/v1</p>
+        </div>
+        <div class="panel">
+          <h3>Defaults for new chats</h3>
+          <label>System prompt<textarea id="dSystem" rows="3"></textarea></label>
+          <label>Ollama keep-alive (e.g. 5m, 1h, -1 to keep loaded)<input id="dKeep" size="14"></label>
+        </div>
+        <div class="panel">
+          <h3>Data</h3>
+          <p class="faint small" id="dataDir"></p>
+          <div class="row">
+            <a class="btn" id="backupBtn">Export all</a>
+            <label class="btn"><input type="file" id="restore" accept=".json,application/json" hidden>Import</label>
+            <button class="btn danger" id="wipeBtn">Delete all chats</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="modal" hidden><div class="dialog" id="dialog"></div></div>
+<div class="toast" id="toast" hidden></div>
+<script src="/static/markdown.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

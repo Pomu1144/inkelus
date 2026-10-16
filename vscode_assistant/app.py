@@ -16,14 +16,13 @@ import tkinter.font as tkfont
 from datetime import datetime, timezone
 from tkinter import filedialog, messagebox, ttk
 
-from . import mdtk, net, providers, theme as themes, web
+from . import engine, mdtk, net, providers, theme as themes, web
 from .library import TEXT_TYPES, Library
 from .store import Store, new_id
 from .widgets import (Btn, NavItem, Panel, ScrollFrame, Slip, Tab, bind_wheel, entry, style_ttk, textbox)
 
 APP_NAME = "VSCode Assistant"
 ASSETS = themes.ASSETS
-TOOL_RESULT_LIMIT = 15000
 
 
 # ── Formatting helpers ─────────────────────────────────────────────────────
@@ -115,22 +114,7 @@ def fit_text(font, text, px):
     return text[:lo].rstrip() + "…"
 
 
-def context_size(system, messages):
-    """Ollama's default context (2–4k tokens) silently cuts off long documents;
-    pick a window that fits them, unless the chat sets num_ctx itself."""
-    chars = len(system) + sum(len(m.get("content") or "") for m in messages)
-    need = int(chars / 3.2) + 2048
-    size = 4096
-    while size < need and size < 32768:
-        size *= 2
-    return size
-
-
-def split_model(v):
-    if not v or "::" not in v:
-        return None, None
-    a, b = v.split("::", 1)
-    return a, b
+split_model = engine.split_model
 
 
 # ── Message view ───────────────────────────────────────────────────────────
@@ -1005,88 +989,20 @@ class App:
 
     def worker(self, c, conn, model, cancel):
         """Runs on a thread: model turn → tool calls → tool results → … → answer."""
-        prov = providers.create(conn)
-        bs = self.store.settings["web"]
-        tools = None
-        try:
-            if c.get("browser"):
-                tools = web.TOOLS if bs.get("allow_search", True) else \
-                    [t for t in web.TOOLS if t["function"]["name"] != "web_search"]
-                box = self.sandboxes.setdefault(c["id"], web.Sandbox())
-                box.allow_private = bool(bs.get("allow_private"))
-                box.allow_search = bool(bs.get("allow_search", True))
-            steps = int(bs.get("max_steps") or 12)
-            lib_context = self.library.context_prompt(c.get("docs"), c.get("template", "auto"))
-            params = dict(c["params"])
-            if lib_context and not params.get("num_ctx") and conn["type"] == "ollama":
-                params["num_ctx"] = context_size(lib_context, c["messages"])
-            for step in range(steps + 1):
-                history = []
-                system = (c["params"].get("system") or "").strip()
-                if lib_context:
-                    system = (system + "\n\n" if system else "") + lib_context
-                if tools:
-                    system = (system + "\n\n" if system else "") + web.SYSTEM_PROMPT
-                if system:
-                    history.append({"role": "system", "content": system})
-                history += [m for m in c["messages"] if not m.get("error") and m["role"] != "note"]
-                reply = {"role": "assistant", "content": "", "thinking": "", "model": c["model"]}
-                c["messages"].append(reply)
-                self.post("rerender", c["id"])
+        cid = c["id"]
 
-                def on_delta(text, think, r=reply):
-                    r["content"] += text
-                    if think:
-                        r["thinking"] += think
-                    self.post("delta", c["id"])
+        def emit(kind, *args):
+            if kind == "update":
+                self.post("rerender", cid)
+            elif kind == "delta":
+                self.post("delta", cid)
+            elif kind == "done":
+                self.post("done", cid, args[0])
+            elif kind == "toast":
+                self.post("toast", args[0], True)
 
-                calls, stats = prov.chat(model, history, params, on_delta, cancel,
-                                         tools=tools if step < steps else None,
-                                         keep_alive=self.store.settings["defaults"].get("keep_alive") or None)
-                reply["stats"] = stats
-                if not calls:
-                    if not reply["content"].strip() and not reply["thinking"]:
-                        reply["content"] = "_(empty reply)_"
-                    self.post("done", c["id"], stats)
-                    return
-                reply["tool_calls"] = calls
-                for call in calls:
-                    if cancel.is_set():
-                        raise net.Cancelled()
-                    res = {"role": "tool", "name": call["name"], "tool_call_id": call["id"],
-                           "arguments": call["arguments"], "content": "", "status": "running"}
-                    c["messages"].append(res)
-                    self.post("rerender", c["id"])
-                    if call["name"] not in web.TOOL_NAMES or not tools:
-                        res.update(content="Unknown tool %s." % call["name"], status="error", is_error=True)
-                        continue
-                    if bs.get("confirm", True) and not c.get("allow_all_tools") and not self.ask_tool(c, call, cancel):
-                        res.update(content="The user declined this web action.", status="denied", is_error=True)
-                        continue
-                    try:
-                        text, is_err = box.run(call["name"], call["arguments"]), False
-                    except Exception as e:  # report tool failures back to the model
-                        text, is_err = "Tool error: %s" % e, True
-                    if len(text) > TOOL_RESULT_LIMIT:
-                        text = text[:TOOL_RESULT_LIMIT] + "\n…[truncated %d chars]" % (len(text) - TOOL_RESULT_LIMIT)
-                    res.update(content=text, status="error" if is_err else "done", is_error=is_err)
-                    self.post("rerender", c["id"])
-            self.post("done", c["id"], None)
-        except net.Cancelled:
-            last = c["messages"][-1] if c["messages"] else None
-            if last and last["role"] == "assistant":
-                last["content"] += ("\n\n" if last["content"] else "") + "_— stopped —_"
-            elif last and last["role"] == "tool" and last.get("status") == "running":
-                last.update(status="cancelled", content="Cancelled by the user.", is_error=True)
-            self.post("done", c["id"], "stopped")
-        except Exception as e:
-            last = c["messages"][-1] if c["messages"] else None
-            if last and last["role"] == "assistant" and not last["content"] and not last.get("tool_calls"):
-                last["error"] = str(e)
-            else:
-                c["messages"].append({"role": "assistant", "content": "", "error": str(e), "model": c["model"]})
-            self.post("done", c["id"], "error")
-            self.post("toast", str(e), True)
+        box = self.sandboxes.setdefault(cid, web.Sandbox()) if c.get("browser") else None
+        engine.run_turn(self.store, self.library, c, conn, model, cancel, emit, self.ask_tool, box)
 
     def ask_tool(self, c, call, cancel):
         """Ask on the Tk thread whether to run a browser action; blocks the worker."""
@@ -2063,17 +1979,8 @@ class App:
                                             filetypes=[("Markdown", "*.md")])
         if not path:
             return
-        out = ["# " + c["title"], ""]
-        for m in c["messages"]:
-            if m["role"] == "tool":
-                out += ["> ⚙ `%s` %s" % (m.get("name"), json.dumps(m.get("arguments") or {})), ""]
-                continue
-            who = "You" if m["role"] == "user" else (split_model(m.get("model"))[1] or "Assistant")
-            body = "> Error: " + m["error"] if m.get("error") else m.get("content", "")
-            if body.strip():
-                out += ["### " + who, "", body, ""]
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(out))
+            fh.write(engine.chat_markdown(c))
         self.toast("Exported")
 
     def export_all(self):
@@ -2091,21 +1998,10 @@ class App:
         try:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
-            incoming = data if isinstance(data, list) else data.get("chats")
-            have = {c["id"] for c in self.store.chats}
-            added = [c for c in incoming or [] if isinstance(c, dict) and c.get("id") and
-                     isinstance(c.get("messages"), list) and c["id"] not in have]
-            for c in added:
-                c.setdefault("params", {"system": "", "temperature": 0.7, "top_p": 0.9})
-                c.setdefault("updated", time.time())
-                c.setdefault("title", "Imported")
-                # the web version stored images as data: URLs
-                for m in c["messages"]:
-                    m["images"] = [i.split(",", 1)[-1] for i in m.get("images") or []]
-            self.store.chats.extend(added)
+            n = engine.import_chats(self.store, data)
             self.store.save_chats()
             self.render_convos()
-            self.toast("Imported %d conversation%s" % (len(added), "" if len(added) == 1 else "s"))
+            self.toast("Imported %d conversation%s" % (n, "" if n == 1 else "s"))
         except (OSError, ValueError, AttributeError) as e:
             self.toast("Import failed: %s" % e, bad=True)
 
