@@ -154,7 +154,7 @@ class MessageView(tk.Frame):
 
         if role == "assistant" and msg.get("tool_calls") and not (msg.get("content") or "").strip() \
                 and not msg.get("thinking"):
-            tk.Label(self, text="→ using web tools", font=f["label"], bg=th["bg"], fg=th["faint"]).pack(anchor="w")
+            tk.Label(self, text="→ using tools", font=f["label"], bg=th["bg"], fg=th["faint"]).pack(anchor="w")
             return
 
         is_user = role == "user"
@@ -488,6 +488,9 @@ class App:
         self.browser_chip = tk.Label(tools, font=f["label"], padx=12, pady=6, cursor="hand2", highlightthickness=1)
         self.browser_chip.pack(side="left", padx=(0, 8))
         self.browser_chip.bind("<Button-1>", lambda e: self.toggle_browser())
+        self.agent_chip = tk.Label(tools, font=f["label"], padx=12, pady=6, cursor="hand2", highlightthickness=1)
+        self.agent_chip.pack(side="left", padx=(0, 8))
+        self.agent_chip.bind("<Button-1>", lambda e: self.toggle_agent())
         self.library_btn = Btn(tools, th, f, "Library", self.context_dialog, small=True)
         self.library_btn.pack(side="left", padx=(0, 8), fill="y")
         self.params_btn = Btn(tools, th, f, "Parameters", self.toggle_params, small=True)
@@ -655,6 +658,7 @@ class App:
             return
         if self.stream and self.stream["chat_id"] == cid:
             self.stream["cancel"].set()
+        engine.agent_for(self.store).close_chat(cid)
         self.store.chats.remove(c)
         if self.active_id == cid:
             self.active_id = self.store.chats[0]["id"] if self.store.chats else None
@@ -706,15 +710,15 @@ class App:
     def render_browser_chip(self):
         th = self.th
         c = self.active()
-        on = bool(c and c.get("browser"))
-        text = "Web · on" if on else "Web · off"
-        text = themes.case(th, text)
-        if on:
-            self.browser_chip.configure(text=text, bg=th["wash"] if th["name"] == "ink" else th["sel"],
-                                        fg=th["accent_2"] if th["name"] == "ink" else th["on_sel"],
-                                        highlightbackground=th["accent"])
-        else:
-            self.browser_chip.configure(text=text, bg=th["panel_2"], fg=th["dim"], highlightbackground=th["line_2"])
+        for chip, key, name in ((self.browser_chip, "browser", "Web"), (self.agent_chip, "agent", "Browser")):
+            on = bool(c and c.get(key))
+            text = themes.case(th, "%s · %s" % (name, "on" if on else "off"))
+            if on:
+                chip.configure(text=text, bg=th["wash"] if th["name"] == "ink" else th["sel"],
+                               fg=th["accent_2"] if th["name"] == "ink" else th["on_sel"],
+                               highlightbackground=th["accent"])
+            else:
+                chip.configure(text=text, bg=th["panel_2"], fg=th["dim"], highlightbackground=th["line_2"])
 
     def render_library_btn(self):
         c = self.active()
@@ -729,6 +733,14 @@ class App:
         self.render_browser_chip()
         self.toast("Web sandbox on: the model can search and read pages (read-only)." if c["browser"]
                    else "Web sandbox off for this chat.")
+
+    def toggle_agent(self):
+        c = self.active() or self.new_chat()
+        c["agent"] = not c.get("agent")
+        self.store.save_chats()
+        self.render_browser_chip()
+        self.toast("Browser on: the model can open pages, click and type in its own browser window. It asks "
+                   "before each action." if c["agent"] else "Browser off for this chat.")
 
     def toggle_params(self):
         if self.params.winfo_ismapped():
@@ -1002,7 +1014,8 @@ class App:
                 self.post("toast", args[0], True)
 
         box = self.sandboxes.setdefault(cid, web.Sandbox()) if c.get("browser") else None
-        engine.run_turn(self.store, self.library, c, conn, model, cancel, emit, self.ask_tool, box)
+        agent = engine.agent_for(self.store) if c.get("agent") else None
+        engine.run_turn(self.store, self.library, c, conn, model, cancel, emit, self.ask_tool, box, agent)
 
     def ask_tool(self, c, call, cancel):
         """Ask on the Tk thread whether to run a browser action; blocks the worker."""
@@ -1018,15 +1031,18 @@ class App:
     def show_confirm(self, cid, call, ev, box):
         th, f = self.th, self.f
         d = tk.Toplevel(self.root, bg=th["panel_2"])
-        d.title("Web action")
+        is_agent = call["name"].startswith("browser_")
+        d.title("Browser action" if is_agent else "Web action")
         d.transient(self.root)
         d.resizable(False, False)
         tk.Frame(d, bg=th["accent"], height=3, width=34).place(x=18, y=0)
         body = tk.Frame(d, bg=th["panel_2"])
         body.pack(padx=24, pady=20, fill="both")
-        tk.Label(body, text=themes.case(self.th, "Allow web action?"), font=f["h2"], bg=th["panel_2"],
+        tk.Label(body, text=themes.case(self.th, "Allow browser action?" if is_agent else "Allow web action?"),
+                 font=f["h2"], bg=th["panel_2"],
                  fg=th["text"]).pack(anchor="w")
-        tk.Label(body, text="The model wants to use the sandbox browser (read-only):", font=f["label"], bg=th["panel_2"],
+        tk.Label(body, text="The model wants to act in the agent browser window:" if is_agent else
+                 "The model wants to use the sandbox browser (read-only):", font=f["label"], bg=th["panel_2"],
                  fg=th["dim"]).pack(anchor="w", pady=(6, 8))
         tk.Label(body, text=call["name"], font=(f["mono"][0], f["mono"][1] + 1, "bold"), bg=th["panel_2"],
                  fg=th["accent_2"]).pack(anchor="w")

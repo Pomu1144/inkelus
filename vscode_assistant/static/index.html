@@ -31,6 +31,7 @@
         <h1 id="chatTitle" title="Click to rename">New conversation</h1>
         <div class="tools">
           <button class="btn chip" id="webBtn" title="Let the model search and read web pages (read-only sandbox)">Web · off</button>
+          <button class="btn chip" id="agentBtn" title="Let the model drive a real browser window: open pages, click, type">Browser · off</button>
           <button class="btn" id="libBtn">Library</button>
           <button class="btn" id="paramsBtn">Parameters</button>
           <button class="btn" id="exportBtn">Export</button>
@@ -145,6 +146,19 @@
           <label class="check"><input type="checkbox" data-web="allow_search"> Allow web search (DuckDuckGo)</label>
           <label class="check"><input type="checkbox" data-web="allow_private"> Allow local and intranet addresses (localhost, 10.x, 192.168.x…)</label>
           <label class="inline">Max web steps per reply <input id="webSteps" inputmode="numeric" size="4"></label>
+        </div>
+        <div class="panel">
+          <h3>Agent browser</h3>
+          <p class="faint small">Turn on <b>Browser</b> in a chat's header to let the model use a real browser window: open pages, click, type, choose options and press keys. It starts your installed Chrome (or Edge or Chromium) as a separate window with its own private profile, so it shares nothing with your everyday browser or any other browser product. Each chat gets its own tab. It won't type into password fields: open the window here and log in to sites yourself; the profile remembers it. Needs a model that supports tool calling.</p>
+          <label>Ask before
+            <select id="agentConfirm">
+              <option value="actions">Every action that changes something (open, click, type…) (recommended)</option>
+              <option value="all">Every step, including just reading the page</option>
+              <option value="none">Never (the model acts on its own)</option>
+            </select></label>
+          <label class="inline">Max steps per reply <input id="agentSteps" inputmode="numeric" size="4"></label>
+          <label>Browser program (leave empty to find Chrome, Edge or Chromium automatically)<input id="agentChrome" placeholder="C:\Program Files\Google\Chrome\Application\chrome.exe"></label>
+          <div class="row"><button class="btn" id="agentOpen">Open the agent browser</button><span class="faint small" id="agentStatus"></span></div>
         </div>
         <div class="panel">
           <h3>Servers</h3>

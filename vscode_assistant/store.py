@@ -46,6 +46,11 @@ DEFAULT_SETTINGS = {
         "allow_private": False,   # refuse localhost / intranet addresses
         "max_steps": 8,
     },
+    "agent": {                    # the agent browser (a real Chrome window the model can drive)
+        "confirm": "actions",     # "actions": ask before clicks/typing/opening; "all"; "none"
+        "chrome_path": "",        # empty: find Chrome / Edge / Chromium automatically
+        "max_steps": 25,
+    },
 }
 
 
@@ -106,6 +111,7 @@ class Store:
             "id": new_id(), "title": "New conversation", "titled": False,
             "model": model or self.settings.get("last_model", ""),
             "browser": False,
+            "agent": False,           # may drive the agent browser window
             "docs": [],               # Library documents shared with the model
             "template": "auto",       # "auto", "" (none) or a template name
             "params": {"system": self.settings["defaults"].get("system", ""), "temperature": 0.7,

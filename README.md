@@ -118,6 +118,56 @@ also edit them with any editor. With Ollama, the app enlarges the context
 window when documents are attached so they aren't cut off; set **Context
 (num_ctx)** under **Parameters** to choose it yourself.
 
+## Agent browser
+
+Click **Browser · off** in a chat's header to let the model use a real
+browser window: open pages, click, type, choose options and press keys. It
+works like an AI browser assistant, but it's built into this app and stands
+on its own:
+
+- It starts your installed **Chrome** (or Edge or Chromium) as a separate
+  window with its **own private profile** in the app's data folder
+  (`agent-browser`). It shares no history, cookies, logins or extensions with
+  your everyday browser or any other browser app.
+- It controls that window over Chrome's built-in DevTools protocol on a
+  random local port, using only Python's standard library.
+- Each chat gets its own tab. You can watch everything it does, and use the
+  window yourself at any time.
+
+The model sees each page as text plus a numbered list of links, buttons and
+fields, and acts by number:
+
+| Tool | What it does |
+|---|---|
+| `browser_open` | Opens a URL |
+| `browser_snapshot` | Looks at the current page again |
+| `browser_click` | Clicks a link, button, checkbox, tab… |
+| `browser_type` | Types into a text field, optionally pressing Enter |
+| `browser_select` | Chooses an option in a dropdown |
+| `browser_press` | Presses a key (Enter, Tab, Escape, arrows, Page Up/Down) |
+| `browser_scroll` | Scrolls up or down |
+| `browser_back` | Goes back a page |
+| `browser_find` | Finds text on the page |
+
+Safety:
+
+- By default you **approve every action that changes something** (opening,
+  clicking, typing…); just reading the page doesn't ask. Change this in
+  **Settings › Agent browser** (browser version) to ask for every step, or
+  never.
+- It **can't type into password fields**. To use sites that need a login,
+  click **Open the agent browser** in Settings (or turn Browser on and let it
+  open), log in yourself, and the private profile remembers it.
+- Page text is passed to the model marked as untrusted, and the model is
+  told never to follow instructions found on web pages and to ask you before
+  buying, posting, sending or deleting anything.
+
+You need a model that supports tool calling; bigger models (7B+) handle
+multi-step browsing much better than tiny ones. On some work computers,
+company policy blocks Chrome's remote control (`RemoteDebuggingAllowed`); the
+app tells you if that happens. Set the browser path in Settings, or the
+`VSCODE_ASSISTANT_CHROME` environment variable, if it can't find Chrome.
+
 ## Web sandbox
 
 Click **Web · off** in a chat's header to turn it on. The model gets five
@@ -197,6 +247,7 @@ vscode_assistant/static/        the browser version's page, styles and scripts
 vscode_assistant/engine.py      the chat + tool loop, shared by both versions
 vscode_assistant/providers.py   Ollama + OpenAI-compatible clients (streaming, tool calls)
 vscode_assistant/web.py         the sandbox browser (read-only web tools)
+vscode_assistant/agent_browser.py  the agent browser: drives a Chrome window over DevTools
 vscode_assistant/mdtk.py        Markdown → Tk text renderer
 vscode_assistant/widgets.py     styled widgets: main button, nav rail rows, panels
 vscode_assistant/theme.py       Professional, Ink and Glass palettes, font loading

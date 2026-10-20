@@ -204,6 +204,9 @@
     const web = !!(c && c.browser);
     $("#webBtn").textContent = "Web · " + (web ? "on" : "off");
     $("#webBtn").classList.toggle("on", web);
+    const ag = !!(c && c.agent);
+    $("#agentBtn").textContent = "Browser · " + (ag ? "on" : "off");
+    $("#agentBtn").classList.toggle("on", ag);
     const docs = c ? (c.docs || []).filter(d => S.library.documents.includes(d)).length : 0;
     $("#libBtn").textContent = docs ? "Library · " + docs + " doc" + (docs === 1 ? "" : "s") : "Library";
     fillParams();
@@ -228,7 +231,7 @@
         (res ? '<div class="res" title="Click to expand">' + esc(res.slice(0, 6000)) + "</div>" : "") + "</div>";
     }
     if (m.role === "assistant" && m.tool_calls && !(m.content || "").trim() && !m.thinking) {
-      return '<div class="using">→ using web tools</div>';
+      return '<div class="using">→ using tools</div>';
     }
     const user = m.role === "user";
     const who = user ? "You" : modelName(m.model);
@@ -432,9 +435,17 @@
   }
   function closeModal() { $("#modal").hidden = true; $("#dialog").innerHTML = ""; $("#dialog").dataset.confirm = ""; }
 
+  const AGENT_VERBS = {
+    browser_open: "open a page", browser_click: "click something", browser_type: "type into a field",
+    browser_select: "choose an option", browser_press: "press a key", browser_back: "go back a page",
+    browser_snapshot: "look at the page", browser_scroll: "scroll the page", browser_find: "search the page",
+  };
   function showConfirm(ev) {
     const args = JSON.stringify(ev.call.arguments || {}, null, 2);
-    const d = openModal('<h3>Allow web action?</h3><p class="dim small">The model wants to use the sandbox browser (read-only):</p>' +
+    const agent = ev.call.name in AGENT_VERBS;
+    const intro = agent ? "<h3>Allow browser action?</h3><p class=\"dim small\">The model wants to " + esc(AGENT_VERBS[ev.call.name]) +
+      " in the agent browser window:</p>" : '<h3>Allow web action?</h3><p class="dim small">The model wants to use the sandbox browser (read-only):</p>';
+    const d = openModal(intro +
       '<p><b class="name" style="font-family:var(--mono);color:var(--accent-2)">' + esc(ev.call.name) + "</b></p><pre>" +
       esc(args.slice(0, 4000)) + '</pre><div class="row between"><button class="btn danger" data-a="deny">Deny</button>' +
       '<span><button class="btn" data-a="all">Allow all in this chat</button> <button class="btn primary" data-a="ok">Allow</button></span></div>',
@@ -679,6 +690,13 @@
     $("#dSystem").value = s.defaults.system || "";
     $("#dKeep").value = s.defaults.keep_alive || "";
     $("#dataDir").textContent = "Conversations and settings are saved in " + S.dataDir;
+    const ag = s.agent || {};
+    $("#agentConfirm").value = ag.confirm || "actions";
+    $("#agentSteps").value = ag.max_steps || 25;
+    $("#agentChrome").value = ag.chrome_path || "";
+    api("GET", "agent/status").then(r => {
+      $("#agentStatus").textContent = r.chrome ? (r.running ? "Running · " : "Uses ") + r.chrome : "No Chrome, Edge or Chromium found: set the path above.";
+    }).catch(() => {});
     renderConns();
   }
   function renderConns() {
@@ -737,6 +755,12 @@
       toast(c.browser ? "Web sandbox on: the model can search and read pages (read-only)." : "Web sandbox off for this chat.");
     });
     $("#libBtn").onclick = guard(libraryDialog);
+    $("#agentBtn").onclick = guard(async () => {
+      const c = await patchChat({ agent: !(S.chat && S.chat.agent) });
+      renderChat();
+      toast(c.agent ? "Browser on: the model can open pages, click and type in its own browser window. It asks before each action."
+        : "Browser off for this chat.");
+    });
     $("#paramsBtn").onclick = () => ($("#params").hidden = !$("#params").hidden);
     $("#exportBtn").onclick = () => {
       if (!S.chat || !S.chat.messages.length) { toast("Nothing to export yet."); return; }
@@ -822,6 +846,15 @@
     $$("#themeTabs .tab").forEach(t => (t.onclick = guard(async () => { await patchSettings({ web_theme: t.dataset.theme }); applyTheme(); })));
     $$("[data-web]").forEach(cb => (cb.onchange = guard(() => patchSettings({ web: { [cb.dataset.web]: cb.checked } }))));
     $("#webSteps").onchange = guard(() => patchSettings({ web: { max_steps: parseInt($("#webSteps").value, 10) || 8 } }));
+    $("#agentConfirm").onchange = guard(() => patchSettings({ agent: { confirm: $("#agentConfirm").value } }));
+    $("#agentSteps").onchange = guard(() => patchSettings({ agent: { max_steps: parseInt($("#agentSteps").value, 10) || 25 } }));
+    $("#agentChrome").onchange = guard(async () => { await patchSettings({ agent: { chrome_path: $("#agentChrome").value } }); fillSettings(); });
+    $("#agentOpen").onclick = guard(async () => {
+      $("#agentStatus").textContent = "Starting…";
+      await api("POST", "agent/open", {});
+      toast("Agent browser opened. Log in to any sites you want it to use; the window remembers them.");
+      fillSettings();
+    });
     $("#dSystem").onchange = guard(() => patchSettings({ defaults: { system: $("#dSystem").value } }));
     $("#dKeep").onchange = guard(() => patchSettings({ defaults: { keep_alive: $("#dKeep").value.trim() } }));
     $("#connList").onclick = guard(async e => {

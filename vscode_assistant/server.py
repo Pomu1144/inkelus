@@ -26,7 +26,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import engine, net, providers, web
+from . import agent_browser, engine, net, providers, web
 from .library import KINDS, Library
 from .store import Store, new_id
 
@@ -137,8 +137,9 @@ class Hub:
                 self.confirms.pop(rid, None)
                 self.publish({"type": "confirm_done", "id": rid})
 
+        agent = engine.agent_for(self.store) if c.get("agent") else None
         threading.Thread(target=engine.run_turn, daemon=True,
-                         args=(self.store, self.library, c, conn, model, cancel, emit, ask_tool, box)).start()
+                         args=(self.store, self.library, c, conn, model, cancel, emit, ask_tool, box, agent)).start()
         self.publish({"type": "chat", "chat": chat_summary(c, self), "messages": c["messages"]})
 
 
@@ -339,7 +340,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.ok({"chat": c, "busy": c["id"] in h.streams})
             if method == "PATCH":
                 b = self.body()
-                for k in ("title", "model", "browser", "docs", "template"):
+                for k in ("title", "model", "browser", "agent", "docs", "template"):
                     if k in b:
                         c[k] = b[k]
                 if "title" in b:
@@ -354,6 +355,7 @@ class Handler(BaseHTTPRequestHandler):
             if method == "DELETE":
                 if c["id"] in h.streams:
                     h.streams[c["id"]].set()
+                engine.agent_for(h.store).close_chat(c["id"])
                 h.store.chats.remove(c)
                 h.save_chats()
                 return self.ok()
@@ -501,6 +503,14 @@ class Handler(BaseHTTPRequestHandler):
                     s["web"][k] = bool(b["web"][k])
             if "max_steps" in b["web"]:
                 s["web"]["max_steps"] = max(1, min(int(b["web"]["max_steps"]), 30))
+        if isinstance(b.get("agent"), dict):
+            a = s.setdefault("agent", {})
+            if b["agent"].get("confirm") in ("actions", "all", "none"):
+                a["confirm"] = b["agent"]["confirm"]
+            if "chrome_path" in b["agent"]:
+                a["chrome_path"] = str(b["agent"]["chrome_path"]).strip().strip('"')
+            if "max_steps" in b["agent"]:
+                a["max_steps"] = max(5, min(int(b["agent"]["max_steps"]), 60))
         if isinstance(b.get("defaults"), dict):
             for k in ("system", "keep_alive"):
                 if k in b["defaults"]:
@@ -542,6 +552,18 @@ class Handler(BaseHTTPRequestHandler):
             h.save_settings()
             return self.ok({"settings": public_settings(s)})
         return self.fail(405, "Method not allowed")
+
+    def api_agent(self, method, parts, query):
+        """Open the agent browser window, e.g. so the user can log in to sites first."""
+        if method == "POST" and parts == ["open"]:
+            b = engine.agent_for(self.hub.store)
+            b.show()
+            return self.ok({"profile": b.profile})
+        if method == "GET" and parts == ["status"]:
+            b = engine.agent_for(self.hub.store)
+            return self.ok({"running": b.alive(), "profile": b.profile,
+                            "chrome": agent_browser.find_chrome(self.hub.store.settings.get("agent", {}).get("chrome_path", ""))})
+        return self.fail(404, "Unknown agent action")
 
     def api_library(self, method, parts, query):
         lib = self.hub.library
