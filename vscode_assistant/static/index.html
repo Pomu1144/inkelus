@@ -15,6 +15,7 @@
     <button class="btn primary block new-chat" id="newChat"><i class="plus">+</i><span>New chat</span></button>
     <nav class="nav">
       <a data-view="chat" class="active"><svg viewBox="0 0 16 16"><path d="M2 3h12v8H7l-4 3v-3H2z"/></svg>Chat</a>
+      <a data-view="projects"><svg viewBox="0 0 16 16"><path d="M1.5 3.5h5l1.5 1.5h6.5v8.5h-13z M5.5 8l-1.5 1.5 1.5 1.5 M10.5 8l1.5 1.5-1.5 1.5"/></svg>Projects</a>
       <a data-view="models"><svg viewBox="0 0 16 16"><path d="M8 1.5l6 3.5v6l-6 3.5-6-3.5V5z M2 5l6 3.5L14 5 M8 8.5V14.5"/></svg>Models</a>
       <a data-view="library"><svg viewBox="0 0 16 16"><path d="M3 1.5h8v11H3z M5 4.5h4 M5 7h4 M13 4v10.5H5"/></svg>Library</a>
       <a data-view="passwords"><svg viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>Passwords</a>
@@ -33,6 +34,7 @@
         <h1 id="chatTitle" title="Click to rename">New conversation</h1>
         <div class="tools">
           <button class="btn chip" id="webBtn" title="Let the model search and read web pages (read-only sandbox)">Web · off</button>
+          <button class="btn chip" id="projBtn" title="Let the model read and change one of your code projects">Project · none</button>
           <button class="btn chip" id="agentBtn" title="Let the model drive a real browser window: open pages, click, type">Browser · off</button>
           <button class="btn" id="libBtn">Library</button>
           <button class="btn" id="paramsBtn">Parameters</button>
@@ -66,6 +68,72 @@
           <button class="btn primary send" id="sendBtn" type="submit" title="Send (Enter)"><span class="lbl">Send</span><svg class="ico-send" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/></svg><svg class="ico-stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/></svg></button>
         </div>
       </form>
+    </section>
+
+    <!-- Projects -->
+    <section class="view" id="view-projects" hidden>
+      <header class="head">
+        <h1 id="projTitle">Projects</h1>
+        <div class="tools">
+          <label class="picker" id="projPicker" hidden><span>PROJECT</span><select id="projPick"></select></label>
+          <button class="btn" id="projAdd">Add project</button>
+          <button class="btn" id="projSettings" hidden>Project settings</button>
+          <button class="btn primary" id="projChat" hidden>Chat about this project</button>
+        </div>
+      </header>
+      <div class="scroll" id="projEmpty" hidden>
+        <div class="proj-start">
+          <p class="dim">Open a code project to browse and edit its files, run commands, and commit, pull and push
+            with Git. Then chat about it: the AI can read the code, propose changes (you approve each one as a diff),
+            run the tests and fix what fails.</p>
+          <div class="cards">
+            <button class="card" data-add="open"><b>Open a folder</b><span>A project that's already on this computer, such as a repo you cloned.</span></button>
+            <button class="card" data-add="clone"><b>Clone from GitHub</b><span>Paste a repository address. Uses your own Git login.</span></button>
+            <button class="card" data-add="zip"><b>Import a ZIP</b><span>A downloaded project archive (e.g. GitHub's "Download ZIP").</span></button>
+          </div>
+          <p class="faint small" id="gitMissing" hidden>Git isn't installed, so Git features are off. Install it from git-scm.com and restart the app.</p>
+        </div>
+      </div>
+      <div class="ws" id="projWs" hidden>
+        <div class="gitbar" id="gitBar"></div>
+        <div class="ws-body">
+          <aside class="ws-side">
+            <div class="tabs side-tabs">
+              <button class="tab active" data-side="files">Files</button>
+              <button class="tab" data-side="changes">Changes <b id="chgCount"></b></button>
+              <button class="tab" data-side="history">History</button>
+            </div>
+            <div class="side-pane" id="sideFiles">
+              <div class="row tight"><input id="fileFilter" type="search" placeholder="Find a file"><button class="icon-btn" id="newFile" title="New file">+</button><button class="icon-btn" id="refreshFiles" title="Refresh">⟳</button></div>
+              <div class="tree" id="tree"></div>
+            </div>
+            <div class="side-pane" id="sideChanges" hidden>
+              <div class="changes" id="changes"></div>
+              <div class="commit-box" id="commitBox">
+                <textarea id="commitMsg" rows="3" placeholder="Commit message"></textarea>
+                <div class="row tight between"><button class="btn small" id="genMsg" title="Ask the AI to describe the changes">✨ Write message</button>
+                  <button class="btn small primary" id="commitBtn">Commit</button></div>
+              </div>
+            </div>
+            <div class="side-pane" id="sideHistory" hidden><div class="history" id="history"></div></div>
+          </aside>
+          <div class="ws-main">
+            <div class="ed-head" id="edHead"><span class="ed-path" id="edPath">No file open</span><span class="faint small" id="edState"></span>
+              <span class="ed-acts"><button class="btn small" id="edDiff" hidden>Diff</button><button class="btn small" id="edAsk" hidden>Ask AI</button>
+              <button class="btn small danger" id="edDelete" hidden>Delete</button><button class="btn small primary" id="edSave" hidden>Save</button></span></div>
+            <div class="editor" id="editor">
+              <div class="ed-empty faint" id="edEmpty">Pick a file on the left. Ctrl+S saves.</div>
+              <div class="ed-code" id="edCode" hidden><pre class="gutter" id="gutter"></pre><textarea id="code" spellcheck="false" wrap="off"></textarea></div>
+              <div class="diffview" id="diffView" hidden></div>
+            </div>
+            <div class="term" id="term">
+              <div class="term-head"><span class="faint small">TERMINAL</span><input id="termCmd" placeholder="Run a command in the project folder, e.g. pytest, npm test, git status" spellcheck="false">
+                <button class="btn small" id="termRun">Run</button><button class="btn small" id="termStop" hidden>Stop</button><button class="icon-btn" id="termClear" title="Clear">⌫</button><button class="icon-btn" id="termToggle" title="Hide or show">▾</button></div>
+              <pre class="term-out" id="termOut"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- Models -->
@@ -201,7 +269,7 @@
         </div>
         <div class="panel">
           <h3>Agent browser</h3>
-          <p class="faint small">Turn on <b>Browser</b> in a chat's header to let the model use a real browser window: open pages, click, type, choose options and press keys. It starts your installed Chrome (or Edge or Chromium) as a separate window with its own private profile, so it shares nothing with your everyday browser or any other browser product. Each chat gets its own tab. It won't type into password fields: open the window here and log in to sites yourself; the profile remembers it. Needs a model that supports tool calling.</p>
+          <p class="faint small">Turn on <b>Browser</b> in a chat's header to let the model use a real browser window: open pages, click, type, choose options and press keys. It starts your installed Chrome (or Edge or Chromium) as a separate window with its own private profile, so it shares nothing with your everyday browser or any other browser product. Each chat gets its own tab. When a site needs a login, it asks you to pick one from Passwords and fills it in without the AI seeing it; or open the window here and log in yourself, and the profile remembers it. Needs a model that supports tool calling.</p>
           <label>Ask before
             <select id="agentConfirm">
               <option value="actions">Every action that changes something (open, click, type…) (recommended)</option>
@@ -248,6 +316,7 @@
 <div class="toast" id="toast" hidden></div>
 <script src="/static/markdown.js"></script>
 <script src="/static/vault.js"></script>
+<script src="/static/projects.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

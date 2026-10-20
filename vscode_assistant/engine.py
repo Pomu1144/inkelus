@@ -7,7 +7,7 @@ nothing about HTTP or the page.
 """
 import json
 
-from . import agent_browser, net, providers, web
+from . import agent_browser, net, projects, providers, web
 
 TOOL_RESULT_LIMIT = 15000
 
@@ -30,18 +30,24 @@ def context_size(system, messages):
     return size
 
 
-def compact(messages, keep=2):
-    """Shorten all but the latest few browser page snapshots, so long browser
+PROJECT_READS = {"read_file", "search_code", "list_files", "git_diff", "run_command"}
+
+
+def compact(messages, keep=2, keep_reads=6):
+    """Shorten all but the latest few browser page snapshots and project file reads, so long
     sessions still fit in a small model's context window."""
-    idx = [i for i, m in enumerate(messages) if m["role"] == "tool" and m.get("name") in agent_browser.TOOL_NAMES]
-    old = set(idx[:-keep]) if len(idx) > keep else set()
-    if not old:
+    def older(names, n):
+        idx = [i for i, m in enumerate(messages) if m["role"] == "tool" and m.get("name") in names]
+        return set(idx[:-n]) if len(idx) > n else set()
+    pages, reads = older(agent_browser.TOOL_NAMES, keep), older(PROJECT_READS, keep_reads)
+    if not pages and not reads:
         return messages
     out = []
     for i, m in enumerate(messages):
-        if i in old and len(m.get("content") or "") > 300:
+        if (i in pages or i in reads) and len(m.get("content") or "") > 300:
             head = "\n".join((m["content"] or "").split("\n")[:3])
-            m = dict(m, content=head + "\n(older page snapshot shortened)")
+            m = dict(m, content=head + ("\n(older page snapshot shortened)" if i in pages else
+                                        "\n(older output shortened; read it again if you need it)"))
         out.append(m)
     return out
 
@@ -51,10 +57,18 @@ def agent_for(store):
     return agent_browser.shared(store.dir, (store.settings.get("agent") or {}).get("chrome_path", ""))
 
 
-def needs_confirm(store, c, name):
+def needs_confirm(store, c, name, preview=None):
     """Whether this tool call needs the user's OK before it runs."""
     if name in agent_browser.SELF_CONFIRMING:
         return False   # browser_login asks for approval itself, every time, whatever the settings
+    if name in projects.TOOL_NAMES:
+        if name in projects.READ_ONLY:
+            return False
+        if name in projects.ALWAYS_ASK:
+            return True          # every push is approved on its own
+        if name == "run_command":
+            return not (preview or {}).get("allowed")   # commands the user allowed for the project run without asking
+        return not c.get("allow_all_tools")
     if c.get("allow_all_tools"):
         return False
     if name in agent_browser.TOOL_NAMES:
@@ -63,7 +77,7 @@ def needs_confirm(store, c, name):
     return bool(store.settings["web"].get("confirm", True))
 
 
-def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, agent=None):
+def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, agent=None, projs=None):
     """One reply, including any tool round-trips.
 
     emit(kind, *args) is called with:
@@ -71,9 +85,11 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
       "delta"            text streamed into the last message
       "done", info       finished; info is a stats dict, "stopped" or "error"
       "toast", text      an error worth showing
-    ask_tool(c, call, cancel) -> bool decides whether a web action may run.
+    ask_tool(c, call, cancel, preview) -> bool decides whether a tool call may run; preview says
+    what it would do (a diff, a command, a push) so the user can judge it.
     sandbox is this chat's web.Sandbox, or None when the web is off.
     agent is the shared agent_browser.AgentBrowser when this chat may drive the browser window.
+    projs is the projects.Projects list; the chat's project (if any) gets the coding tools.
     """
     prov = providers.create(conn)
     bs = store.settings["web"]
@@ -86,10 +102,16 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
             sandbox.allow_search = bool(bs.get("allow_search", True))
         if c.get("agent") and agent is not None:
             tools = (tools or []) + agent_browser.TOOLS
+        proj = projs.for_chat(c) if projs is not None else None
+        if proj is not None:
+            tools = (tools or []) + projects.TOOLS
         driving = bool(c.get("agent") and agent is not None)
         steps = int(bs.get("max_steps") or 12)
         if driving:  # browser tasks take many small steps
             steps = max(steps, int((store.settings.get("agent") or {}).get("max_steps") or 25))
+        if proj is not None:  # so do coding tasks: read, edit, test, fix
+            steps = max(steps, 40)
+            driving = True
         lib_context = library.context_prompt(c.get("docs"), c.get("template", "auto")) if library else ""
         params = dict(c["params"])
         if (lib_context or driving) and not params.get("num_ctx") and conn["type"] == "ollama":
@@ -103,6 +125,8 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
                 system = (system + "\n\n" if system else "") + web.SYSTEM_PROMPT
             if tools and agent is not None and c.get("agent"):
                 system = (system + "\n\n" if system else "") + agent_browser.SYSTEM_PROMPT
+            if proj is not None:
+                system = (system + "\n\n" if system else "") + proj.system_prompt()
             if system:
                 history.append({"role": "system", "content": system})
             history += compact([m for m in c["messages"] if not m.get("error") and m["role"] != "note"])
@@ -138,15 +162,43 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
                     res.update(content="Unknown tool %s." % call["name"], status="error", is_error=True)
                     continue
                 is_agent = call["name"] in agent_browser.TOOL_NAMES
-                if needs_confirm(store, c, call["name"]) and not ask_tool(c, call, cancel):
-                    res.update(content="The user declined this %s action." % ("browser" if is_agent else "web"),
-                               status="denied", is_error=True)
+                is_proj = call["name"] in projects.TOOL_NAMES
+                preview = None
+                if is_proj:
+                    res["project"] = proj.id
+                    try:
+                        preview = proj.preview(call["name"], call["arguments"])
+                    except (projects.ToolError, projects.gitops.GitError, OSError, ValueError) as e:
+                        res.update(content="Tool error: %s" % e, status="error", is_error=True)
+                        emit("update")
+                        continue
+                    if preview and preview.get("kind") == "diff":
+                        res["diff"] = preview["diff"][:60000]
+                        res["path"] = preview["path"]
+                if needs_confirm(store, c, call["name"], preview) and not ask_tool(c, call, cancel, preview):
+                    kind = "browser" if is_agent else "project" if is_proj else "web"
+                    res.update(content="The user declined this %s action." % kind, status="denied", is_error=True)
+                    if c.get("decline_note"):
+                        res["content"] += " Their note: " + c.pop("decline_note")
                     continue
                 try:
                     if is_agent:
                         text, is_err = agent.run(c["id"], call["name"], call["arguments"]), False
+                    elif is_proj:
+                        if call["name"] in projects.EDITS:
+                            rel, before, after = proj.apply(call["name"], call["arguments"])
+                            res["change"] = projs.record(proj.id, rel, before, after)
+                            res["diff"] = projects.unified(rel, before, after)[:60000]
+                            add, rem = projects.diff_counts(res["diff"])
+                            text = "%s %s (+%d -%d)." % ("Deleted" if after is None else "Created" if before is None
+                                                          else "Updated", rel, add, rem)
+                        else:
+                            text = proj.run(call["name"], call["arguments"], cancel)
+                        is_err = False
                     else:
                         text, is_err = sandbox.run(call["name"], call["arguments"]), False
+                except net.Cancelled:
+                    raise
                 except Exception as e:  # report tool failures back to the model
                     text, is_err = "Tool error: %s" % e, True
                 if len(text) > TOOL_RESULT_LIMIT:

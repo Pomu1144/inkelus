@@ -7,9 +7,10 @@ its own browser window, and from there it opens whatever else it needs, such
 as the **agent browser** window the AI can drive.
 
 It brings together chat with your local models (Ollama, LM Studio,
-llama.cpp…), a read-only **web sandbox**, an **agent browser**, a **Library**
-of documents and templates, an encrypted **Passwords** vault, and chat
-**groups**.
+llama.cpp…), **Projects** (a code workspace with an editor, Git and a
+terminal, where the AI can read, change and test your code), a read-only
+**web sandbox**, an **agent browser**, a **Library** of documents and
+templates, an encrypted **Passwords** vault, and chat **groups**.
 
 ## Run it
 
@@ -63,6 +64,9 @@ on the start page. **Blue dark**, **Light** and **Match system** are in
   - Load or unload a model.
   - View a model's details: template, parameters, license, context length.
   - Pull new models with a progress bar, and delete models.
+- **Projects**: open, clone or import a code project; edit files, run
+  commands, and commit, pull and push with Git; let the AI read, change
+  and test the code with your approval. See [Projects](#projects) below.
 - **Library**: a place to keep **documents** (reference material the AI
   can read) and **templates** (examples of how answers should be laid out).
   See [Library](#library) below.
@@ -88,6 +92,67 @@ on the start page. **Blue dark**, **Light** and **Match system** are in
   an animated *Working*, *Thinking* (while a reasoning model reasons) or
   *Answering* (in Fast mode) with a seconds counter. Running tool steps show
   a small spinner.
+
+## Projects
+
+Work on your code without opening another editor. **Projects** in the sidebar:
+
+- **Add a project** three ways: **open a folder** that's already on your
+  computer (a repo you cloned), **clone from GitHub** (paste the address), or
+  **import a ZIP** (e.g. GitHub's *Download ZIP*). Files are worked on in
+  place; nothing is copied or uploaded.
+- **Files**: a file tree (it respects `.gitignore`) and an editor with line
+  numbers, auto-indent and `Ctrl+S` to save. **Ask AI** starts a chat about
+  the open file.
+- **Terminal**: run any command in the project folder (`pytest`, `npm test`,
+  `git log`…) and see the output as it arrives. `↑`/`↓` recall earlier
+  commands.
+- **Git**, using the Git installed on your computer:
+  - The bar at the top shows the branch and how many commits you are ahead
+    ↑ or behind ↓ the remote. Click the branch to switch or create one.
+  - **Changes** lists changed files. Click one to see its diff, untick
+    files to leave them out, press **✨ Write message** to have the AI
+    describe the changes, then **Commit**. ↺ discards a file's changes.
+  - **Pull** only fast-forwards. If your branch and the remote have both
+    changed, it asks whether to **merge** or **rebase**. If lines conflict,
+    the files are marked: fix them (or ask the AI to), then **Continue**, or
+    **Abort** to go back.
+  - **Push** shows which commits will be sent and asks first. It never
+    force-pushes, and refuses while the remote has commits you haven't
+    pulled. A new branch is created on the remote for you.
+  - **History** lists recent commits.
+  - **Logging in to GitHub** is left to Git: Git Credential Manager (part of
+    Git for Windows), an SSH key, or `gh auth login`. If `git push` works in
+    your own terminal, it works here; the app never sees your credentials.
+    Git isn't installed? Get it from <https://git-scm.com>.
+
+**Chatting about a project.** Press **Chat about this project**, or turn on
+**Project** in any chat's header. The AI then gets tools to:
+
+- **look around**: list files, read files, search the code, and see the Git
+  status, diff and log. These run without asking.
+- **change files** (edit, create, delete). Each change is shown to you as a
+  diff first: **Apply change**, **Reject** (you can add a note telling the AI
+  why or what to do instead), or **Allow all edits in this chat**. Applied
+  changes have an **Undo this change** button in the chat.
+- **run commands**, e.g. the tests, so it can check its work and fix what
+  fails. You approve each command; tick *Always allow `npm test` in this
+  project* for ones you trust. Commands that chain others (`;`, `&&`, `|`)
+  always ask.
+- **commit, pull, switch branches and push.** Commits, pulls and branch
+  switches ask first. **Every push asks**, showing the commits, and "allow
+  all" never covers pushes.
+
+It can only reach files inside the project folder, and never inside `.git`.
+**Project settings** has notes for the AI (how to run the project,
+conventions, what to avoid; added to every chat about it), the list of
+always-allowed commands, and **protected branches** the AI may not push to
+(you still can). *Remove from the app* only takes a project off the list;
+its files stay where they are.
+
+Coding works best with a model that's good at tool calling, such as
+`qwen2.5-coder:14b`, `qwen3:14b` or larger. Small models (7–8B) manage
+simple fixes but often lose track in multi-step changes.
 
 ## Library
 
@@ -281,7 +346,9 @@ tool calls.
 
 - `Enter` sends, `Shift+Enter` adds a new line
 - `Esc` stops generation (or closes a dialog)
-- `Ctrl+S` saves in the Library editor
+- `Ctrl+S` saves in the Library and Projects editors
+- `Tab` / `Shift+Tab` indent and unindent in the Projects editor
+- `Ctrl+Enter` commits in the commit message box
 
 ## Files
 
@@ -290,7 +357,10 @@ run.py / run.pyw                   start the command center (run_web.py / .pyw d
 vscode_assistant/server.py         local web server + JSON API; opens the app window
 vscode_assistant/static/           the app's page, styles and scripts
 vscode_assistant/static/vault.js   the encrypted password vault (Web Crypto, in the page)
+vscode_assistant/static/projects.js  the Projects workspace (files, editor, Git, terminal)
 vscode_assistant/engine.py         the chat + tool loop
+vscode_assistant/projects.py       projects: file access, the AI's coding tools, commands, undo
+vscode_assistant/gitops.py         Git commands (status, diff, commit, pull, push, branches)
 vscode_assistant/providers.py      Ollama + OpenAI-compatible clients (streaming, tool calls)
 vscode_assistant/web.py            the sandbox browser (read-only web tools)
 vscode_assistant/agent_browser.py  the agent browser: drives a Chrome window over DevTools

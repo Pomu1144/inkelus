@@ -5,6 +5,7 @@
   const $ = s => document.querySelector(s);
   const $$ = s => Array.from(document.querySelectorAll(s));
   const esc = MD.esc;
+  let Projects = null;   // projects.js, set up in start()
 
   const S = {
     settings: null, chats: [], library: { documents: [], templates: [] }, dataDir: "",
@@ -96,6 +97,7 @@
   }
 
   function handleEvent(ev) {
+    if (Projects && (ev.type === "term" || ev.type === "term_done" || ev.type === "chat")) Projects.onEvent(ev);
     if (ev.type === "delta") {
       if (S.chat && ev.chat_id === S.chat.id) {
         S.chat.messages[ev.index] = ev.message;
@@ -215,6 +217,7 @@
 
   function showView(name) {
     if (S.view === "library" && name !== "library" && !libConfirmLeave()) return;
+    if (S.view === "projects" && name !== "projects" && Projects && !Projects.leaving()) return;
     S.view = name;
     $$(".nav a").forEach(a => a.classList.toggle("active", a.dataset.view === name));
     $$(".view").forEach(v => (v.hidden = v.id !== "view-" + name));
@@ -222,6 +225,7 @@
     if (name === "library") loadLibrary();
     if (name === "settings") fillSettings();
     if (name === "passwords") renderVault();
+    if (name === "projects") guard(Projects.show)();
   }
 
   // ── Chat ─────────────────────────────────────────────────────────────
@@ -276,6 +280,9 @@
     const web = !!(c && c.browser);
     $("#webBtn").textContent = "Web · " + (web ? "on" : "off");
     $("#webBtn").classList.toggle("on", web);
+    const pname = c && c.project && Projects ? Projects.projectName(c.project) : "";
+    $("#projBtn").textContent = "Project · " + (pname || "none");
+    $("#projBtn").classList.toggle("on", !!pname);
     const ag = !!(c && c.agent);
     $("#agentBtn").textContent = "Browser · " + (ag ? "on" : "off");
     $("#agentBtn").classList.toggle("on", ag);
@@ -298,11 +305,12 @@
       const args = JSON.stringify(m.arguments || {});
       const st = m.status || (m.is_error ? "error" : "done");
       const res = (m.content || "").trim();
-      return '<div class="tool' + (m.is_error ? " err" : "") + '"><div class="t-head"><span class="name">⚙ ' +
+      return '<div class="tool' + (m.is_error ? " err" : "") + '" data-i="' + i + '"><div class="t-head"><span class="name">⚙ ' +
         esc(m.name || "tool") + '</span><span class="args">' + esc(args) + '</span><span class="st' +
         (st === "error" || st === "denied" ? " bad" : "") + '">' + (st === "running" ? '<i class="spin"></i>' : "") +
         esc(st) + "</span></div>" +
-        (res ? '<div class="res" title="Click to expand">' + esc(res.slice(0, 6000)) + "</div>" : "") + "</div>";
+        (res ? '<div class="res" title="Click to expand">' + esc(res.slice(0, 6000)) + "</div>" : "") +
+        (Projects && (m.diff || m.change) ? Projects.toolExtra(m) : "") + "</div>";
     }
     if (m.role === "assistant" && m.tool_calls && !(m.content || "").trim() && !m.thinking) {
       return '<div class="using">→ using tools</div>';
@@ -521,7 +529,7 @@
     $("#modal").hidden = false;
     return d;
   }
-  function closeModal() { $("#modal").hidden = true; $("#dialog").innerHTML = ""; $("#dialog").dataset.confirm = ""; }
+  function closeModal() { $("#modal").hidden = true; $("#dialog").innerHTML = ""; $("#dialog").dataset.confirm = ""; $("#dialog").className = "dialog"; }
 
   const AGENT_VERBS = {
     browser_open: "open a page", browser_click: "click something", browser_type: "type into a field",
@@ -530,6 +538,8 @@
     browser_check: "tick or untick a box", browser_dialog: "answer a pop-up dialog on the page",
   };
   function showConfirm(ev) {
+    const pv = Projects && Projects.confirmView(ev);
+    if (pv) return showProjectConfirm(ev, pv);
     const args = JSON.stringify(ev.call.arguments || {}, null, 2);
     const agent = ev.call.name in AGENT_VERBS;
     const intro = agent ? "<h3>Allow browser action?</h3><p class=\"dim small\">The model wants to " + esc(AGENT_VERBS[ev.call.name]) +
@@ -544,6 +554,26 @@
       closeModal();
       await api("POST", "confirm", { id: ev.id, ok: a !== "deny", all: a === "all" });
     })));
+  }
+
+  // A project tool call (a file change, a command, a push…), shown the way it will happen.
+  function showProjectConfirm(ev, v) {
+    const d = openModal("<h3>" + esc(v.title) + "</h3>" + v.body +
+      (v.note ? '<label class="note">If you say no, tell the AI why or what to do instead (optional)<input id="declineNote" placeholder="' +
+        (ev.preview.kind === "diff" ? "e.g. keep the old function name" : "e.g. not yet, run the tests first") + '"></label>' : "") +
+      '<div class="row between"><button class="btn danger" data-a="deny">' + (v.note ? "Reject" : "Deny") + "</button><span>" +
+      (v.allowAll ? '<button class="btn" data-a="all">' + esc(v.allowAll) + "</button> " : "") +
+      '<button class="btn primary" data-a="ok">' + esc(v.ok) + "</button></span></div>", { confirm: ev.id });
+    if (v.wide) d.classList.add("wide");
+    d.querySelectorAll("button[data-a]").forEach(b => (b.onclick = guard(async () => {
+      const a = b.dataset.a;
+      const prefix = $("#allowPrefix") && $("#allowPrefix").checked ? $("#allowPrefix").value : "";
+      const note = $("#declineNote") ? $("#declineNote").value : "";
+      closeModal();
+      await api("POST", "confirm", { id: ev.id, ok: a !== "deny", all: a === "all", allow_prefix: prefix, note });
+    })));
+    const ok = d.querySelector('[data-a="ok"]');
+    if (ok) setTimeout(() => ok.focus(), 30);
   }
 
   // ── Saved logins ─────────────────────────────────────────────────────
@@ -986,6 +1016,7 @@
       toast(c.browser ? "Web sandbox on: the model can search and read pages (read-only)." : "Web sandbox off for this chat.");
     });
     $("#libBtn").onclick = guard(libraryDialog);
+    $("#projBtn").onclick = guard(() => Projects.pickForChat());
     $("#fastBtn").onclick = guard(async () => {
       const c = await ensureChat();
       const on = !(c.params && c.params.fast);
@@ -1017,6 +1048,14 @@
         await navigator.clipboard.writeText(cp.closest("pre").querySelector("code").textContent);
         cp.textContent = "Copied";
         setTimeout(() => (cp.textContent = "Copy"), 1200);
+        return;
+      }
+      const un = e.target.closest("[data-undo]");
+      if (un) {
+        const m = S.chat.messages[+un.closest("[data-i]").dataset.i];
+        await Projects.undo(m.project || S.chat.project, un.dataset.undo);
+        un.disabled = true;
+        un.textContent = "Undone";
         return;
       }
       const res = e.target.closest(".tool .res");
@@ -1199,6 +1238,8 @@
 
   // ── Start ────────────────────────────────────────────────────────────
   (async function start() {
+    Projects = window.VAProjects({ api, toast, guard, esc, openModal, closeModal, $, $$, S, showView, patchChat,
+      renderChat, renderRail, newChat, currentModel, autosize });
     wire();
     try {
       await loadState();
@@ -1207,6 +1248,7 @@
       return;
     }
     await guard(() => Vault.init(api))();
+    await guard(Projects.load)();
     connectEvents();
     renderRail();
     let last = null;
