@@ -101,6 +101,7 @@
             <div class="tabs side-tabs">
               <button class="tab active" data-side="files">Files</button>
               <button class="tab" data-side="changes">Changes <b id="chgCount"></b></button>
+              <button class="tab" data-side="tests">Tests <b id="testBadge"></b></button>
               <button class="tab" data-side="history">History</button>
             </div>
             <div class="side-pane" id="sideFiles">
@@ -114,6 +115,11 @@
                 <div class="row tight between"><button class="btn small" id="genMsg" title="Ask the AI to describe the changes">✨ Write message</button>
                   <button class="btn small primary" id="commitBtn">Commit</button></div>
               </div>
+            </div>
+            <div class="side-pane" id="sideTests" hidden>
+              <label class="tiny">Test command<span class="row tight"><input id="testCmd" spellcheck="false" placeholder="e.g. npm test">
+                <button class="btn small primary" id="testRun" title="Run the tests in the Terminal">▶ Run</button></span></label>
+              <div class="tests" id="tests"></div>
             </div>
             <div class="side-pane" id="sideHistory" hidden><div class="history" id="history"></div></div>
           </aside>

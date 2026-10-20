@@ -508,3 +508,34 @@ pre.cmd { font: 13px var(--mono); background: var(--code); padding: 10px 12px; b
 .tool .tdiff .diff { max-height: 360px; margin-top: 6px; border: 1px solid var(--line); }
 .tool .undo { margin-top: 6px; }
 @media (max-width: 900px) { .ws-body { grid-template-columns: 1fr; } .proj-start .cards { grid-template-columns: 1fr; } }
+
+/* ── tests ── */
+.ws-body { grid-template-columns: 300px 1fr; }
+.side-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.side-tabs .tab { padding: 3px 8px; }
+.side-tabs .tab b.bad { color: var(--red); }
+#sideTests label { margin: 2px 0 8px; }
+.tests { flex: 1; overflow: auto; font-size: 13px; }
+.t-sec { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin: 10px 2px 4px;
+  font-size: 11.5px; color: var(--faint); text-transform: uppercase; letter-spacing: .03em; }
+.t-sec:first-child { margin-top: 2px; }
+.t-sec b { font-weight: 600; color: var(--dim); text-transform: none; }
+.t-sec > span { display: flex; align-items: center; gap: 4px; }
+.ts, .tr { display: flex; gap: 8px; padding: 6px; border-radius: 6px; }
+.tr { cursor: pointer; } .tr:hover, .ts:hover { background: var(--panel-hi); } .tr.active { background: var(--sel); }
+.ti { font-style: normal; width: 14px; flex: none; text-align: center; color: var(--faint); font-weight: 700; }
+.ts.passed .ti, .ts.done .ti, .tr.ok .ti { color: var(--green); }
+.ts.failed .ti, .tr.bad .ti { color: var(--red); }
+.ts.dismissed { opacity: .55; } .ts.dismissed .ttl { text-decoration: line-through; }
+.tt { flex: 1; min-width: 0; } .ttl { overflow-wrap: anywhere; }
+.tt code { font-size: 11.5px; }
+.tacts { display: none; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+.ts:hover .tacts { display: flex; }
+.linkish { background: none; border: 0; color: var(--faint); cursor: pointer; font-size: 12px; padding: 4px 6px; }
+.linkish:hover { color: var(--text); }
+.run-detail { padding: 14px 16px; font-family: var(--sans); }
+.run-detail .rd-head { font-size: 15px; margin-bottom: 4px; }
+.run-detail .rd-head.ok b { color: var(--green); } .run-detail .rd-head.bad b { color: var(--red); }
+.run-detail h4 { margin: 14px 0 6px; font-size: 12px; color: var(--faint); text-transform: uppercase; letter-spacing: .03em; }
+.run-detail .fails { margin: 0 0 10px; padding-left: 20px; }
+.run-detail pre.term-out { border-radius: var(--r-sm); border: 1px solid var(--line); max-height: none; }

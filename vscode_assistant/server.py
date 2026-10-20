@@ -45,6 +45,7 @@ class Hub:
         self.store = Store()
         self.library = Library(self.store.dir)
         self.projects = projects.Projects(self.store)
+        self.projects.tests.publish = self.publish
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
         self.clients = []           # one queue per open event stream
@@ -803,12 +804,86 @@ class Handler(BaseHTTPRequestHandler):
             if b.get("stop"):
                 P.term_stop(p.id)
                 return self.ok()
-            return self.ok({"run": P.term_start(p.id, b.get("command"), h.publish)})
+            return self.ok({"run": P.term_start(p.id, b.get("command"), h.publish, bool(b.get("test")),
+                                                b.get("suggestion") or None)})
+        if sub == "tests":
+            T = P.tests
+            if method == "GET":
+                d = T.get(p.id)
+                return self.ok(dict(d, test_command=p.data.get("test_command", ""), guess=projects.testlog.guess_command(p.root)))
+            b = self.body()
+            act = b.get("action")
+            if act == "add":
+                added = T.suggest(p.id, [b], "you")
+                if not added:
+                    return self.fail(400, "Give the test a title (or it's already on the list).")
+                return self.ok({"suggestion": added[0]})
+            if act == "update":
+                return self.ok({"suggestion": T.update(p.id, b.get("id"), b)})
+            if act == "delete":
+                T.delete(p.id, sid=b.get("id"))
+                return self.ok()
+            if act == "clear_runs":
+                T.delete(p.id, runs=True)
+                return self.ok()
+            if act == "suggest":
+                return self.ok({"added": T.suggest(p.id, self.suggest_tests(p, b), "ai")})
+            return self.fail(400, "Unknown Tests action.")
         if sub == "undo" and method == "POST":
             return self.ok({"path": P.undo(self.body().get("change"))})
         if sub == "commit_message" and method == "POST":
             return self.ok({"message": self.commit_message(p, self.body())})
         return self.fail(404, "Unknown project action")
+
+    def ask_model(self, b, prompt):
+        """One quick, non-streaming answer from the current model (Fast mode, no tools)."""
+        h = self.hub
+        model = b.get("model") or h.store.settings.get("last_model")
+        cid, name = engine.split_model(model)
+        conn = h.store.conn(cid)
+        if not conn:
+            raise ValueError("Pick a model in Settings first.")
+        out = []
+        providers.create(conn).chat(name, [{"role": "user", "content": prompt}], {"temperature": 0.2, "fast": True},
+                                    lambda t, th: out.append(t), threading.Event())
+        return "".join(out).split("</think>")[-1].strip()
+
+    def suggest_tests(self, p, b):
+        """Ask the model which tests are missing, from the project's layout, its test files and recent changes."""
+        tree, _ = p.outline(120)
+        files = p.files()
+        tests = [f for f in files if projects.re.search(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_|_test\.|\.(test|spec)\.", f)]
+        changed = ""
+        if gitops.git_path() and p.is_git():
+            try:
+                changed = projects.clip(gitops.diff(p.root), 6000)
+            except gitops.GitError:
+                pass
+        samples = []
+        for f in [x for x in files if x not in tests and projects.re.search(r"\.(py|js|ts|tsx|jsx|go|rs|java|cs|rb|php|kt|swift)$", x)][:6]:
+            try:
+                samples.append("--- %s\n%s" % (f, projects.read_text(projects.os.path.join(p.root, f))[0][:2500]))
+            except projects.ToolError:
+                pass
+        have = [s["title"] for s in self.hub.projects.tests.get(p.id)["suggested"]]
+        prompt = ("You review a code project and list tests that are missing or worth running. Reply with 3 to 8 lines, "
+                  "each exactly in this form and nothing else:\nTEST: <what to test> | <why it matters, one sentence> | "
+                  "<file the test belongs in>\n\nProject layout:\n" + tree +
+                  "\n\nExisting test files: " + (", ".join(tests[:60]) or "none") +
+                  ("\n\nAlready suggested (don't repeat): " + "; ".join(have[:40]) if have else "") +
+                  ("\n\nUncommitted changes:\n" + changed if changed.strip() else "") +
+                  "\n\nSome source files:\n" + "\n\n".join(samples))
+        items = []
+        for line in self.ask_model(b, prompt).splitlines():
+            line = line.strip().lstrip("-*0123456789. ").strip()
+            if line.upper().startswith("TEST:"):
+                line = line[5:]
+            parts = [x.strip().strip("`") for x in line.split("|")]
+            if len(parts) >= 2 and parts[0]:
+                items.append({"title": parts[0], "why": parts[1], "file": parts[2] if len(parts) > 2 else ""})
+        if not items:
+            raise ValueError("The model didn't suggest any tests in a form the app understands. Try again or another model.")
+        return items
 
     def commit_message(self, p, b):
         """Ask the current model for a commit message describing the uncommitted changes."""

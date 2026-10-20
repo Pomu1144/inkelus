@@ -174,7 +174,7 @@ window.VAProjects = function (app) {
       $("#projPick").value = P.cur;
       return;
     }
-    if (P.cur !== id) { P.file = null; P.diffPath = null; P.openDirs = new Set(); P.unchecked = new Set(); }
+    if (P.cur !== id) { P.file = null; P.diffPath = null; P.detail = null; P.tests = null; P.openDirs = new Set(); P.unchecked = new Set(); }
     P.cur = id;
     store("va-project", id);
     const p = cur();
@@ -201,6 +201,7 @@ window.VAProjects = function (app) {
     renderTree();
     renderChanges();
     renderHistory();
+    loadTests();
     if (reloadFile && P.file && !P.file.dirty && P.file.project === id) {
       if (P.files.includes(P.file.path)) await openFile(P.file.path, true);
       else { P.file = null; renderEditor(); }
@@ -348,6 +349,7 @@ window.VAProjects = function (app) {
     const r = await api("GET", "projects/" + P.cur + "/file?path=" + encodeURIComponent(path));
     P.file = { project: P.cur, path: r.path, text: r.text, reason: r.reason, mtime: r.mtime, dirty: false };
     P.diffPath = null;
+    P.detail = null;
     const parts = r.path.split("/");
     for (let i = 1; i < parts.length; i++) P.openDirs.add(parts.slice(0, i).join("/"));
     if (!quiet) renderTree();
@@ -355,11 +357,11 @@ window.VAProjects = function (app) {
   }
   function renderEditor() {
     const f = P.file;
-    const diffing = !!P.diffPath;
+    const diffing = !!P.diffPath || !!P.detail;
     $("#edEmpty").hidden = !!f || diffing;
     $("#edCode").hidden = !f || diffing || f.text == null;
     $("#diffView").hidden = !diffing;
-    $("#edPath").textContent = diffing ? P.diffPath + " (changes)" : f ? f.path : "No file open";
+    $("#edPath").textContent = P.detail ? P.detail.label : diffing ? P.diffPath + " (changes)" : f ? f.path : "No file open";
     $("#edSave").hidden = $("#edDelete").hidden = $("#edAsk").hidden = !f || diffing || f.text == null;
     $("#edDiff").hidden = !f || diffing || !statusMap()[f.path];
     $("#edState").textContent = f && !diffing ? (f.text == null ? f.reason || "" : f.dirty ? "● unsaved" : "") : "";
@@ -440,6 +442,7 @@ window.VAProjects = function (app) {
   }
   async function showDiff(path) {
     P.diffPath = path;
+    P.detail = null;
     $$("#changes .cf").forEach(el => el.classList.toggle("active", el.dataset.diff === path));
     const r = await api("GET", "projects/" + P.cur + "/diff?path=" + encodeURIComponent(path));
     if (P.diffPath !== path) return;
@@ -494,7 +497,127 @@ window.VAProjects = function (app) {
     $("#sideFiles").hidden = name !== "files";
     $("#sideChanges").hidden = name !== "changes";
     $("#sideHistory").hidden = name !== "history";
+    $("#sideTests").hidden = name !== "tests";
     if (name !== "changes" && P.diffPath) { P.diffPath = null; renderEditor(); }
+    if (name !== "tests" && P.detail) { P.detail = null; renderEditor(); }
+  }
+
+  // tests: every test run (yours and the AI's) and tests suggested to write or run
+  function ago(t) {
+    const s = (Date.now() / 1000) - t;
+    return s < 60 ? "just now" : s < 3600 ? Math.floor(s / 60) + "m ago" : s < 86400 ? Math.floor(s / 3600) + "h ago" : Math.floor(s / 86400) + "d ago";
+  }
+  const STATUS_ICON = { todo: "○", passed: "✓", done: "✓", failed: "✗", dismissed: "–" };
+  async function loadTests() {
+    const id = P.cur;
+    if (!id) return;
+    const t = await api("GET", "projects/" + id + "/tests").catch(() => null);
+    if (!t || id !== P.cur) return;
+    P.tests = t;
+    renderTests();
+    if (P.detail && P.detail.run) {
+      const r = t.runs.find(x => x.id === P.detail.run);
+      if (r) showRun(r, true);
+    }
+  }
+  function renderTests() {
+    const t = P.tests;
+    if (!t) return;
+    const last = t.runs[0];
+    const open = t.suggested.filter(s => s.status === "todo" || s.status === "failed");
+    const badge = $("#testBadge");
+    badge.textContent = last && !last.ok ? "✗" : open.length ? open.length : "";
+    badge.className = last && !last.ok ? "bad" : "";
+    const inp = $("#testCmd");
+    if (document.activeElement !== inp) inp.value = t.test_command || t.guess || "";
+    inp.placeholder = t.guess || "e.g. npm test";
+    const shown = t.suggested.filter(s => P.showDismissed || s.status !== "dismissed");
+    const hidden = t.suggested.length - shown.length;
+    let h = '<div class="t-sec"><span>Suggested <b>' + open.length + " open</b></span><span>" +
+      '<button class="icon-btn" data-t="add" title="Add a test yourself">+</button>' +
+      '<button class="btn small" data-t="suggest" title="Ask the AI which tests are missing">✨ Suggest</button></span></div>';
+    h += shown.length ? shown.map(s => '<div class="ts ' + esc(s.status) + '" data-sug="' + esc(s.id) + '">' +
+      '<i class="ti">' + (STATUS_ICON[s.status] || "○") + '</i><div class="tt"><div class="ttl">' + esc(s.title) + "</div>" +
+      (s.why ? '<div class="faint tiny">' + esc(s.why) + "</div>" : "") +
+      '<div class="tacts">' + (s.command ? '<button class="btn small" data-t="srun" title="' + esc(s.command) + '">▶ Run</button>' : "") +
+      '<button class="btn small" data-t="write" title="Ask the AI to write this test">Write with AI</button>' +
+      (s.status === "dismissed" ? '<button class="btn small" data-t="reopen">Reopen</button>' :
+        (s.status !== "passed" && s.status !== "done" ? '<button class="icon-btn" data-t="done" title="Mark done">✓</button>' : "") +
+        '<button class="icon-btn" data-t="dismiss" title="Dismiss">✕</button>') + "</div></div></div>").join("")
+      : '<p class="faint small">No suggestions yet. Press ✨ Suggest, or ask the AI in a project chat what to test.</p>';
+    if (hidden) h += '<button class="linkish" data-t="showdis">Show ' + hidden + " dismissed</button>";
+    h += '<div class="t-sec"><span>Runs <b>' + t.runs.length + "</b></span>" + (t.runs.length ? '<button class="icon-btn" data-t="clear" title="Clear the run history">⌫</button>' : "") + "</div>";
+    h += t.runs.length ? t.runs.map(r => '<div class="tr' + (r.ok ? " ok" : r.code === null ? " stop" : " bad") + (P.detail && P.detail.run === r.id ? " active" : "") +
+      '" data-run="' + esc(r.id) + '"><i class="ti">' + (r.ok ? "✓" : r.code === null ? "■" : "✗") + '</i><div class="tt"><div class="ttl">' + esc(r.summary) + "</div>" +
+      '<div class="faint tiny"><code>' + esc(r.command) + "</code> · " + (r.by === "ai" ? "AI" : "you") + " · " + ago(r.when) + "</div></div></div>").join("")
+      : '<p class="faint small">No test runs yet. Press ▶ Run, run tests in the Terminal, or let the AI run them; they all show up here.</p>';
+    $("#tests").innerHTML = h;
+  }
+  function showRun(r, quiet) {
+    P.diffPath = null;
+    P.detail = { label: "Test run · " + r.summary, run: r.id };
+    $("#diffView").innerHTML = '<div class="run-detail"><div class="rd-head ' + (r.ok ? "ok" : "bad") + '"><b>' + (r.ok ? "✓ Passed" : r.code === null ? "■ Stopped" : "✗ Failed") +
+      "</b> · " + esc(r.summary) + '</div><p class="faint small"><code>' + esc(r.command) + "</code> · run by " + (r.by === "ai" ? "the AI" : "you") + " · " +
+      esc(new Date(r.when * 1000).toLocaleString()) + (r.seconds ? " · " + r.seconds + "s" : "") + " · exit code " + (r.code === null ? "none" : r.code) + "</p>" +
+      (r.failures && r.failures.length ? '<h4>Failing</h4><ul class="fails">' + r.failures.map(f => "<li><code>" + esc(f) + "</code></li>").join("") + "</ul>" +
+        '<button class="btn small primary" data-t="fix">Ask the AI to fix these</button>' : (!r.ok ? '<button class="btn small primary" data-t="fix">Ask the AI to fix this</button>' : "")) +
+      " <button class=\"btn small\" data-t=\"rerun\">▶ Run again</button><h4>Output</h4><pre class=\"term-out\">" + esc(r.output || "(no output)") + "</pre></div>";
+    if (!quiet) renderTests();
+    renderEditor();
+  }
+  async function runTests(command, suggestion) {
+    if (P.running[P.cur]) { toast("A command is still running in the Terminal. Stop it first.", true); return; }
+    termWrite(P.cur, (P.term[P.cur] ? "\n" : "") + "$ " + command + "\n");
+    $("#term").classList.remove("collapsed");
+    const r = await api("POST", "projects/" + P.cur + "/terminal", { command, test: true, suggestion: suggestion || "" });
+    P.running[P.cur] = r.run;
+    renderTerm();
+  }
+  async function testsClick(e) {
+    const b = e.target.closest("[data-t]");
+    const sug = e.target.closest("[data-sug]");
+    const runEl = e.target.closest("[data-run]");
+    const t = P.tests;
+    if (!b) {
+      if (runEl) { const r = t.runs.find(x => x.id === runEl.dataset.run); if (r) showRun(r); }
+      return;
+    }
+    const act = b.dataset.t;
+    const s = sug && t.suggested.find(x => x.id === sug.dataset.sug);
+    const upd = (st) => api("POST", "projects/" + P.cur + "/tests", { action: "update", id: s.id, status: st });
+    if (act === "add") {
+      const title = prompt("What should be tested? (e.g. add() handles negative numbers)");
+      if (!title || !title.trim()) return;
+      const why = prompt("Why does it matter? (optional)") || "";
+      const command = prompt("Command that runs it, if it exists (optional)") || "";
+      await api("POST", "projects/" + P.cur + "/tests", { action: "add", title, why, command });
+    } else if (act === "suggest") {
+      b.disabled = true;
+      b.textContent = "Thinking…";
+      try {
+        const r = await api("POST", "projects/" + P.cur + "/tests", { action: "suggest", model: app.currentModel() });
+        toast(r.added.length ? "Added " + r.added.length + " suggested test" + (r.added.length === 1 ? "" : "s") : "No new suggestions.");
+      } finally { b.disabled = false; b.textContent = "✨ Suggest"; }
+    } else if (act === "srun") await runTests(s.command, s.id);
+    else if (act === "write") {
+      await chatAbout("Write this test" + (s.file ? " in `" + s.file + "`" : "") + ": " + s.title + (s.why ? " (" + s.why + ")" : "") +
+        ". Then run it and tell me if it passes.");
+    } else if (act === "done") await upd("done");
+    else if (act === "dismiss") await upd("dismissed");
+    else if (act === "reopen") await upd("todo");
+    else if (act === "showdis") { P.showDismissed = true; renderTests(); }
+    else if (act === "clear") { if (confirm("Clear the list of test runs?")) await api("POST", "projects/" + P.cur + "/tests", { action: "clear_runs" }); }
+  }
+  async function detailClick(e) {
+    const b = e.target.closest("[data-t]");
+    if (!b || !P.detail || !P.detail.run || !P.tests) return;
+    const r = P.tests.runs.find(x => x.id === P.detail.run);
+    if (!r) return;
+    if (b.dataset.t === "rerun") await runTests(r.command);
+    else if (b.dataset.t === "fix") {
+      await chatAbout("The tests fail when I run `" + r.command + "`" + (r.failures && r.failures.length ? " (failing: " + r.failures.slice(0, 10).join(", ") + ")" : "") +
+        ". Find out why and fix it, then run the tests again.");
+    }
   }
 
   // terminal
@@ -656,7 +779,8 @@ window.VAProjects = function (app) {
 
   // ── events ───────────────────────────────────────────────────────────
   function onEvent(ev) {
-    if (ev.type === "term") termWrite(ev.project, ev.data);
+    if (ev.type === "tests" && ev.project === P.cur) guard(loadTests)();
+    else if (ev.type === "term") termWrite(ev.project, ev.data);
     else if (ev.type === "term_done") {
       termWrite(ev.project, "\n[exit code " + ev.code + "]\n");
       delete P.running[ev.project];
@@ -747,6 +871,23 @@ window.VAProjects = function (app) {
     $("#genMsg").onclick = guard(genMessage);
     $("#history").onclick = () => {};
     $("#termRun").onclick = guard(termRun);
+    $("#tests").onclick = guard(testsClick);
+    $("#diffView").onclick = guard(detailClick);
+    const saveTestCmd = guard(async () => {
+      const v = $("#testCmd").value.trim();
+      const t = P.tests || {};
+      if (v === (t.test_command || t.guess || "")) return;
+      await api("PATCH", "projects/" + P.cur, { test_command: v === t.guess ? "" : v });
+      t.test_command = v === t.guess ? "" : v;
+    });
+    $("#testCmd").onchange = saveTestCmd;
+    $("#testCmd").onkeydown = e => { if (e.key === "Enter") $("#testRun").click(); };
+    $("#testRun").onclick = guard(async () => {
+      const cmd = $("#testCmd").value.trim();
+      if (!cmd) { toast("Type the command that runs this project's tests, e.g. npm test or pytest.", true); $("#testCmd").focus(); return; }
+      await saveTestCmd();
+      await runTests(cmd);
+    });
     $("#termStop").onclick = guard(async () => { await api("POST", "projects/" + P.cur + "/terminal", { stop: true }); });
     $("#termClear").onclick = () => { P.term[P.cur] = ""; renderTerm(); };
     $("#termToggle").onclick = () => { $("#term").classList.toggle("collapsed"); $("#termToggle").textContent = $("#term").classList.contains("collapsed") ? "▴" : "▾"; };

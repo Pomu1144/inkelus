@@ -25,7 +25,7 @@ import threading
 import time
 import zipfile
 
-from . import gitops
+from . import gitops, testlog
 from .store import new_id
 
 IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "env", ".tox", ".mypy_cache",
@@ -248,6 +248,15 @@ TOOLS = [
     _fn("run_command", "Run a shell command in the project folder, e.g. tests, a linter, a build or a script, and "
         "get its output. The user approves each command. Don't use it for git push/pull (use the git tools).",
         {"command": _S, "timeout_seconds": dict(_I, description="Default 300, max 1800")}, ["command"]),
+    _fn("suggest_tests", "Add tests worth writing or running to the project's Tests list, where the user tracks them. "
+        "Use it when you notice untested behaviour, after fixing a bug (a test that would have caught it), or when "
+        "asked what to test. Doesn't change any files.",
+        {"tests": {"type": "array", "items": {"type": "object", "properties": {
+            "title": dict(_S, description="What to test, e.g. 'add() handles negative numbers'"),
+            "why": dict(_S, description="Why it matters, one sentence"),
+            "file": dict(_S, description="Where the test belongs, optional"),
+            "command": dict(_S, description="Command that runs it, if it already exists, optional")},
+            "required": ["title"]}}}, ["tests"]),
     _fn("git_status", "Current branch, how far ahead/behind the remote it is, and the changed files."),
     _fn("git_diff", "Show uncommitted changes as a diff, for one file or the whole project.",
         {"path": dict(_S, description="Optional file")}),
@@ -264,7 +273,8 @@ TOOLS = [
         {"name": _S, "create": _B}, ["name"]),
 ]
 TOOL_NAMES = [t["function"]["name"] for t in TOOLS]
-READ_ONLY = {"list_files", "read_file", "search_code", "git_status", "git_diff", "git_log"}
+READ_ONLY = {"list_files", "read_file", "search_code", "git_status", "git_diff", "git_log",
+             "suggest_tests"}     # suggest_tests only adds to the app's Tests list
 EDITS = {"edit_file", "write_file", "delete_file"}
 ALWAYS_ASK = {"git_push"}           # "allow all in this chat" never covers a push
 
@@ -274,6 +284,7 @@ SYSTEM_PROMPT = """You are working in a code project on the user's computer, lik
 or write_file (new files, or full rewrites). Keep changes focused on what was asked and match the existing style.
 - The user sees each change as a diff and approves or rejects it. If one is rejected, ask what they'd prefer.
 - After changing code, run the tests or a quick check with run_command when the project has them, and fix what fails.
+- When you spot behaviour that has no test, or fix a bug a test would have caught, add it with suggest_tests.
 - Git: use git_status/git_diff/git_log to see the state; git_commit with a clear message when the user wants a commit; \
 git_pull and git_push only when the user asks. Never rewrite history.
 - Paths are relative to the project root and use forward slashes.
@@ -281,8 +292,16 @@ git_pull and git_push only when the user asks. Never rewrite history.
 
 
 class Project:
-    def __init__(self, data):
+    def __init__(self, data, manager=None):
         self.data = data
+        self.manager = manager
+
+    def test_command(self):
+        return (self.data.get("test_command") or "").strip() or testlog.guess_command(self.root)
+
+    def is_test(self, command):
+        tc = " ".join(self.test_command().split())
+        return testlog.is_test_command(command) or (bool(tc) and " ".join(command.split()) == tc)
 
     id = property(lambda self: self.data["id"])
     name = property(lambda self: self.data["name"])
@@ -361,6 +380,12 @@ class Project:
                 pass
         else:
             head.append("Not a Git repository")
+        tc = self.test_command()
+        head.append("Test command: " + tc if tc else "No test command known yet")
+        if self.manager is not None:
+            brief = self.manager.tests.brief(self.id)
+            if brief:
+                head.append(brief)
         notes = (self.data.get("notes") or "").strip()
         out = SYSTEM_PROMPT + "\n\n" + "\n".join(head) + "\n\nLayout:\n" + tree
         if notes:
@@ -497,6 +522,12 @@ class Project:
             return "%s (%d lines)\n%s%s" % (self.rel(full), total, body or "(empty file)", note)
         if name == "search_code":
             return self.search(a)
+        if name == "suggest_tests":
+            if self.manager is None:
+                raise ToolError("The Tests list isn't available.")
+            added = self.manager.tests.suggest(self.id, a.get("tests"), "ai")
+            return ("Added %d test%s to the Tests list: %s" % (len(added), "" if len(added) == 1 else "s",
+                    "; ".join(s["title"] for s in added))) if added else "Those tests are already on the list."
         if name in EDITS:
             rel, before, after = self.apply(name, a)
             if after is None:
@@ -506,7 +537,11 @@ class Project:
         if name == "run_command":
             cmd = str(a.get("command") or "").strip()
             t = max(5, min(int(a.get("timeout_seconds") or CMD_TIMEOUT), 1800))
+            t0 = time.time()
             code, out = run_command(cmd, self.root, t, cancel)
+            if self.manager is not None and self.is_test(cmd):
+                run = self.manager.tests.add_run(self.id, cmd, code, out, "ai", time.time() - t0)
+                out = out.rstrip() + "\n[test summary: %s]" % run["summary"]
             return "$ %s\n%s\n[exit code %s]" % (cmd, clip(out.strip() or "(no output)"), "none" if code is None else code)
         if not gitops.git_path():
             raise ToolError("Git isn't installed on this computer.")
@@ -632,13 +667,14 @@ class Projects:
         self.changes = {}     # change id -> {"project", "path", "before", "after"} for undo
         self.terms = {}       # project id -> {"proc", "id"} for the Terminal panel
         self.lock = threading.Lock()
+        self.tests = testlog.TestLog(store.dir)
 
     def all(self):
         return self.store.settings.setdefault("projects", [])
 
     def get(self, pid):
         d = next((p for p in self.all() if p["id"] == pid), None)
-        return Project(d) if d else None
+        return Project(d, self) if d else None
 
     def for_chat(self, c):
         p = self.get(c.get("project") or "") if c.get("project") else None
@@ -648,7 +684,8 @@ class Projects:
         exists = os.path.isdir(p["path"])
         return {"id": p["id"], "name": p["name"], "path": p["path"], "exists": exists,
                 "notes": p.get("notes", ""), "allowed_commands": p.get("allowed_commands", []),
-                "protected": p.get("protected", [])}
+                "protected": p.get("protected", []), "test_command": p.get("test_command", ""),
+                "test_guess": testlog.guess_command(p["path"]) if exists else ""}
 
     def add_folder(self, path):
         path = os.path.abspath(os.path.expanduser((path or "").strip().strip('"')))
@@ -722,6 +759,8 @@ class Projects:
             d["notes"] = str(b["notes"])[:20000]
         if isinstance(b.get("allowed_commands"), list):
             d["allowed_commands"] = [" ".join(str(x).split())[:200] for x in b["allowed_commands"] if str(x).strip()][:100]
+        if "test_command" in b:
+            d["test_command"] = " ".join(str(b["test_command"]).split())[:300]
         if isinstance(b.get("protected"), list):
             d["protected"] = [str(x).strip()[:100] for x in b["protected"] if str(x).strip()][:50]
         self.store.save_settings()
@@ -737,6 +776,7 @@ class Projects:
     def remove(self, pid):
         self.store.settings["projects"] = [p for p in self.all() if p["id"] != pid]
         self.store.save_settings()
+        self.tests.forget(pid)
 
     # undo of AI file changes
     def record(self, pid, rel, before, after):
@@ -770,7 +810,7 @@ class Projects:
         return ch["path"]
 
     # the Terminal panel (commands the user types; they run without asking)
-    def term_start(self, pid, command, publish):
+    def term_start(self, pid, command, publish, test=False, suggestion=None):
         p = self.get(pid)
         if not p or not os.path.isdir(p.root):
             raise ValueError("Unknown project.")
@@ -784,9 +824,11 @@ class Projects:
             proc = spawn(command, p.root)
             rid = new_id()
             self.terms[pid] = {"proc": proc, "id": rid}
+        record = test or p.is_test(command)     # test runs go on the Tests list
+        t0 = time.time()
 
         def pump():
-            buf, last = [], [time.time()]
+            buf, last, whole = [], [time.time()], []
 
             def flush():
                 if buf:
@@ -795,7 +837,10 @@ class Projects:
                 last[0] = time.time()
 
             def on_text(t):
-                buf.append(re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", t))
+                t = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", t)
+                buf.append(t)
+                if record:
+                    whole.append(t)
                 if time.time() - last[0] > 0.08 or sum(map(len, buf)) > 8000:
                     flush()
             try:
@@ -803,6 +848,10 @@ class Projects:
             finally:
                 flush()
                 code = proc.wait()
+                killed = self.terms.get(pid, {}).get("stopped") == rid
+                if record:
+                    self.tests.add_run(pid, command, None if killed else code, "".join(whole).replace("\r\n", "\n"),
+                                       "you", time.time() - t0, suggestion=suggestion)
                 publish({"type": "term_done", "project": pid, "run": rid, "code": code})
         threading.Thread(target=pump, daemon=True).start()
         return rid
@@ -810,6 +859,7 @@ class Projects:
     def term_stop(self, pid):
         cur = self.terms.get(pid)
         if cur:
+            cur["stopped"] = cur["id"]
             kill_tree(cur["proc"])
 
 

@@ -97,7 +97,7 @@
   }
 
   function handleEvent(ev) {
-    if (Projects && (ev.type === "term" || ev.type === "term_done" || ev.type === "chat")) Projects.onEvent(ev);
+    if (Projects && (ev.type === "term" || ev.type === "term_done" || ev.type === "chat" || ev.type === "tests")) Projects.onEvent(ev);
     if (ev.type === "delta") {
       if (S.chat && ev.chat_id === S.chat.id) {
         S.chat.messages[ev.index] = ev.message;

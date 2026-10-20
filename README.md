@@ -126,6 +126,27 @@ Work on your code without opening another editor. **Projects** in the sidebar:
     your own terminal, it works here; the app never sees your credentials.
     Git isn't installed? Get it from <https://git-scm.com>.
 
+**Tests tab.** One place for every test run and every test worth writing:
+
+- **Runs**: each test run is listed with ✓/✗ and a summary such as *2
+  passed, 1 failed*. That includes runs you start with **▶ Run**, test
+  commands you type in the Terminal, and the ones the AI runs. Click a run to
+  see the failing tests by name and the full output, then **Ask the AI to fix
+  these** or **Run again**. Output from pytest, unittest, Jest, Vitest, Mocha,
+  `go test`, `cargo test` and simple PASS/FAIL runners is understood.
+- **Suggested**: tests to write or check. **✨ Suggest** asks the AI what's
+  missing (it looks at the layout, the existing tests and your uncommitted
+  changes). In a project chat the AI also adds suggestions on its own, e.g.
+  a test that would have caught a bug it just fixed. You can add your own
+  with **+**. Each one has **Write with AI**, ▶ Run (when it has a command;
+  it's then marked passed or failed), ✓ done and ✕ dismiss.
+- The **test command** is guessed from the project (npm test, pytest, go
+  test, cargo test…) and you can change it. The AI is told the command, the
+  last result and the open suggestions.
+
+The list is kept in the app's data folder (`tests.json`), not in your
+project.
+
 **Chatting about a project.** Press **Chat about this project**, or turn on
 **Project** in any chat's header. The AI then gets tools to:
 
@@ -360,6 +381,7 @@ vscode_assistant/static/vault.js   the encrypted password vault (Web Crypto, in 
 vscode_assistant/static/projects.js  the Projects workspace (files, editor, Git, terminal)
 vscode_assistant/engine.py         the chat + tool loop
 vscode_assistant/projects.py       projects: file access, the AI's coding tools, commands, undo
+vscode_assistant/testlog.py        the Tests list: test runs, their results, and suggested tests
 vscode_assistant/gitops.py         Git commands (status, diff, commit, pull, push, branches)
 vscode_assistant/providers.py      Ollama + OpenAI-compatible clients (streaming, tool calls)
 vscode_assistant/web.py            the sandbox browser (read-only web tools)
