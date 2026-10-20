@@ -134,20 +134,40 @@ on its own:
 - Each chat gets its own tab. You can watch everything it does, and use the
   window yourself at any time.
 
-The model sees each page as text plus a numbered list of links, buttons and
-fields, and acts by number:
+How the model sees and uses a page:
+
+- **Page outline from the accessibility tree.** Each page arrives as an
+  indented outline of roles, names, states and text, the same structure
+  screen readers use, so it stays clear on modern sites. Everything it can
+  use carries a short ref like `[e12]`.
+- **Clickable things without a proper role** (a `<div>` with a click
+  handler or pointer cursor, common in web apps) are found and listed too.
+- **Only the changes after each action.** After a click or typing, the model
+  gets just the lines that changed when that's shorter than the whole page,
+  so long tasks fit in small local models.
+- **Real input.** Clicks are real mouse events at the element's position,
+  and typing clears the field and types key by key, so sites that listen to
+  keystrokes work.
+- **Stable refs.** Refs stay the same until the page changes to a new
+  document. If an element is rebuilt, it's found again by its role and name.
+  After each action it waits for the page to load and stop changing.
+- **Pop-up dialogs.** Alerts are closed and reported. Confirm and prompt
+  dialogs are handed to the model to answer, which you approve like any
+  other action.
 
 | Tool | What it does |
 |---|---|
 | `browser_open` | Opens a URL |
-| `browser_snapshot` | Looks at the current page again |
-| `browser_click` | Clicks a link, button, checkbox, tab… |
-| `browser_type` | Types into a text field, optionally pressing Enter |
+| `browser_snapshot` | Gets the full page outline again |
+| `browser_click` | Clicks a link, button, tab, clickable item… |
+| `browser_type` | Clears a text field and types into it, optionally pressing Enter |
 | `browser_select` | Chooses an option in a dropdown |
-| `browser_press` | Presses a key (Enter, Tab, Escape, arrows, Page Up/Down) |
-| `browser_scroll` | Scrolls up or down |
+| `browser_check` | Ticks or unticks a checkbox, radio button or switch |
+| `browser_press` | Presses a key or shortcut (Enter, Escape, Tab, arrows, `Control+a`…) |
+| `browser_scroll` | Scrolls the page or a scrollable element |
 | `browser_back` | Goes back a page |
-| `browser_find` | Finds text on the page |
+| `browser_find` | Searches the page's text |
+| `browser_dialog` | Answers a confirm or prompt dialog |
 
 Safety:
 
@@ -158,9 +178,10 @@ Safety:
 - It **can't type into password fields**. To use sites that need a login,
   click **Open the agent browser** in Settings (or turn Browser on and let it
   open), log in yourself, and the private profile remembers it.
-- Page text is passed to the model marked as untrusted, and the model is
-  told never to follow instructions found on web pages and to ask you before
-  buying, posting, sending or deleting anything.
+- Page content is fenced with markers that carry a fresh random code each
+  time, so a page can't fake the end of its own content. The model is told
+  never to follow instructions found inside, and to ask you before buying,
+  posting, sending or deleting anything.
 
 You need a model that supports tool calling; bigger models (7B+) handle
 multi-step browsing much better than tiny ones. On some work computers,

@@ -439,6 +439,7 @@
     browser_open: "open a page", browser_click: "click something", browser_type: "type into a field",
     browser_select: "choose an option", browser_press: "press a key", browser_back: "go back a page",
     browser_snapshot: "look at the page", browser_scroll: "scroll the page", browser_find: "search the page",
+    browser_check: "tick or untick a box", browser_dialog: "answer a pop-up dialog on the page",
   };
   function showConfirm(ev) {
     const args = JSON.stringify(ev.call.arguments || {}, null, 2);
