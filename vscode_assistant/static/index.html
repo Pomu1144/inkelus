@@ -1,25 +1,25 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="warm">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="app-token" content="__TOKEN__">
 <title>__APP_NAME__</title>
-<link rel="icon" href="/assets/icon.png">
+<link rel="icon" id="favicon" href="/assets/icon_warm.png">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
 <div id="app">
   <aside class="rail">
-    <div class="brand"><img src="/assets/logo_small.png" alt="" width="24" height="24"><span>__APP_NAME__</span></div>
-    <button class="btn primary block" id="newChat">New chat</button>
+    <div class="brand"><img class="logo-small" src="/assets/logo_small_warm.png" alt="" width="24" height="24"><span>__APP_NAME__</span></div>
+    <button class="btn primary block new-chat" id="newChat"><i class="plus">+</i><span>New chat</span></button>
     <nav class="nav">
       <a data-view="chat" class="active"><svg viewBox="0 0 16 16"><path d="M2 3h12v8H7l-4 3v-3H2z"/></svg>Chat</a>
       <a data-view="models"><svg viewBox="0 0 16 16"><path d="M8 1.5l6 3.5v6l-6 3.5-6-3.5V5z M2 5l6 3.5L14 5 M8 8.5V14.5"/></svg>Models</a>
       <a data-view="library"><svg viewBox="0 0 16 16"><path d="M3 1.5h8v11H3z M5 4.5h4 M5 7h4 M13 4v10.5H5"/></svg>Library</a>
       <a data-view="settings"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15M3 3l1.8 1.8M11.2 11.2L13 13M3 13l1.8-1.8M11.2 4.8L13 3"/></svg>Settings</a>
     </nav>
-    <div class="chats-head"><span>CHATS</span><input id="search" type="search" placeholder="Search" aria-label="Search chats"></div>
+    <div class="chats-head"><span>Recents</span><input id="search" type="search" placeholder="Search" aria-label="Search chats"></div>
     <div class="chat-list" id="chatList"></div>
     <div class="status"><i id="statusDot"></i><span id="statusText">Connecting…</span></div>
   </aside>
@@ -45,9 +45,10 @@
       </div>
       <div class="transcript" id="transcript">
         <div class="empty" id="empty">
-          <img src="/assets/logo.png" alt="" width="88" height="88">
-          <h2>__APP_NAME__</h2>
-          <p class="dim">Chat with your local models</p>
+          <img class="logo-big" src="/assets/logo_warm.png" alt="" width="88" height="88">
+          <h2 class="app-name">__APP_NAME__</h2>
+          <h2 class="greet"><img class="logo-greet" src="/assets/logo_small_warm.png" alt="" width="32" height="32"><span id="greeting">Hello</span></h2>
+          <p class="dim tagline">Chat with your local models</p>
           <p class="dim small">Pick a model in Settings and start writing. Turn on Web to let it search and read pages in a sandbox.</p>
         </div>
         <div class="messages" id="messages"></div>
@@ -56,9 +57,9 @@
         <div class="attachments" id="attachments"></div>
         <textarea id="prompt" rows="2" placeholder="Write to the model…   (Enter to send, Shift+Enter for a new line)"></textarea>
         <div class="bar">
-          <label class="btn small"><input type="file" id="attach" accept="image/*" multiple hidden>Attach image</label>
+          <label class="btn small attach" title="Attach images"><input type="file" id="attach" accept="image/*" multiple hidden><span class="plus-i">+</span><span class="lbl">Attach image</span></label>
           <span class="faint small" id="stats"></span>
-          <button class="btn primary send" id="sendBtn" type="submit">Send</button>
+          <button class="btn primary send" id="sendBtn" type="submit" title="Send (Enter)"><span class="lbl">Send</span><svg class="ico-send" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/></svg><svg class="ico-stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/></svg></button>
         </div>
       </form>
     </section>
@@ -130,10 +131,12 @@
         <div class="panel">
           <h3>Appearance</h3>
           <div class="tabs" id="themeTabs">
-            <button class="tab" data-theme="dark">Dark</button>
+            <button class="tab" data-theme="warm">Warm dark</button>
+            <button class="tab" data-theme="dark">Blue dark</button>
             <button class="tab" data-theme="light">Light</button>
             <button class="tab" data-theme="system">Match system</button>
           </div>
+          <p class="faint small">Warm dark: charcoal greys, a clay accent, rounded shapes and serif replies. Blue dark and Light match the desktop window's Professional style.</p>
         </div>
         <div class="panel">
           <h3>Web sandbox</h3>

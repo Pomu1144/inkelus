@@ -50,8 +50,11 @@ your default browser if Chrome isn't installed. `python -m vscode_assistant
 
 The browser version has everything the desktop window has: streaming chat,
 Markdown with copyable code blocks, the web sandbox, the Library, models and
-settings. It also adds a light theme, and you can paste or drag images into
-the message box. It uses the same data folder, so your chats, settings and
+settings. Its default **Warm dark** theme gives it a calm chat look: charcoal
+greys, a clay accent, rounded shapes, serif replies in one centred column, and
+a greeting on the start page. **Blue dark** (the desktop window's look),
+**Light** and **Match system** are in **Settings › Appearance**. You can also
+paste or drag images into the message box. It uses the same data folder, so your chats, settings and
 Library are shared. Don't run both at the same time, or the one you close
 last overwrites the other's changes.
 

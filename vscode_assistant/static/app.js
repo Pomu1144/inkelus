@@ -53,9 +53,18 @@
   }
 
   function applyTheme() {
-    const t = (S.settings && S.settings.web_theme) || "dark";
+    const t = (S.settings && S.settings.web_theme) || "warm";
     document.documentElement.dataset.theme = t;
     $$("#themeTabs .tab").forEach(b => b.classList.toggle("active", b.dataset.theme === t));
+    const sfx = t === "warm" ? "_warm" : "";
+    $("#favicon").href = "/assets/icon" + sfx + ".png";
+    $$(".logo-small, .logo-greet").forEach(i => (i.src = "/assets/logo_small" + sfx + ".png"));
+    $$(".logo-big").forEach(i => (i.src = "/assets/logo" + sfx + ".png"));
+  }
+
+  function greeting() {
+    const h = new Date().getHours();
+    return h < 5 ? "Working late?" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
   }
 
   async function refreshModels() {
@@ -201,6 +210,8 @@
     updateSend();
     const msgs = c ? c.messages : [];
     $("#empty").hidden = msgs.length > 0;
+    $("#view-chat").classList.toggle("is-empty", !msgs.length);
+    $("#greeting").textContent = greeting();
     const live = c && S.busy.has(c.id);
     $("#messages").innerHTML = msgs.map((m, i) => messageHTML(m, i, live && i === msgs.length - 1)).join("");
     scrollBottom(true);
@@ -221,10 +232,10 @@
     }
     const user = m.role === "user";
     const who = user ? "You" : modelName(m.model);
-    const acts = live ? "" : '<span class="acts"><button data-act="copy" data-i="' + i + '">Copy</button>' +
-      (user ? '<button data-act="edit" data-i="' + i + '">Edit</button>' : "") +
-      (m.role === "assistant" ? '<button data-act="regen" data-i="' + i + '">Retry</button>' : "") +
-      '<button data-act="delete" data-i="' + i + '">Delete</button></span>';
+    const btn = (act, label) => '<button data-act="' + act + '" data-i="' + i + '" title="' + label + '">' + ICONS[act] +
+      '<span class="lbl">' + label + "</span></button>";
+    const acts = live ? "" : '<span class="acts">' + btn("copy", "Copy") + (user ? btn("edit", "Edit") : "") +
+      (m.role === "assistant" ? btn("regen", "Retry") : "") + btn("delete", "Delete") + "</span>";
     let body;
     if (m.error) body = esc(m.error);
     else if (user) body = esc(m.content || "");
@@ -233,9 +244,18 @@
       '<img src="data:image/png;base64,' + esc(b) + '" alt="">').join("") + "</div>" : "";
     const meta = m.stats ? '<div class="meta">' + esc(statsText(m.stats)) + "</div>" : "";
     return '<div class="msg ' + (user ? "user" : "assistant") + (m.error ? " error" : "") + '" data-i="' + i + '">' +
-      '<div class="msg-head"><i class="dot"></i><span>' + esc(who) + "</span>" + acts + "</div>" +
-      '<div class="bubble' + (user || m.error ? "" : " md") + '">' + body + "</div>" + imgs + meta + "</div>";
+      '<div class="msg-head"><i class="dot"></i><span>' + esc(who) + "</span></div>" + imgs +
+      '<div class="bubble' + (user || m.error ? "" : " md") + '">' + body + "</div>" +
+      '<div class="msg-foot">' + acts + meta + "</div></div>";
   }
+
+  const svg = d => '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="' + d + '"/></svg>';
+  const ICONS = {
+    copy: svg("M5.5 5.5h7v8h-7z M3.5 10.5v-8h7"),
+    edit: svg("M10.5 2.5l3 3-7.5 7.5H3v-3z"),
+    regen: svg("M13 8a5 5 0 1 1-1.5-3.5M13 2.5v3h-3"),
+    delete: svg("M3 4.5h10M6.5 4.5v-2h3v2M4.5 4.5l.7 9h5.6l.7-9"),
+  };
 
   function assistantBody(m, live) {
     const [inlineThink, text, open] = MD.splitThink(m.content || "");
@@ -272,7 +292,8 @@
   function updateSend() {
     const busy = S.chat && S.busy.has(S.chat.id);
     const b = $("#sendBtn");
-    b.textContent = busy ? "Stop" : "Send";
+    b.querySelector(".lbl").textContent = busy ? "Stop" : "Send";
+    b.title = busy ? "Stop (Esc)" : "Send (Enter)";
     b.classList.toggle("stop", !!busy);
     if (busy) $("#stats").textContent = "Generating…";
   }
