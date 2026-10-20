@@ -1,4 +1,4 @@
-"""Inkelus — a desktop chat app for local LLMs, with a built-in sandbox browser.
+"""VSCode Assistant — a desktop chat app for local LLMs, with a built-in sandbox browser.
 
 Pure Python: tkinter + the standard library. Network calls run on worker
 threads and report back to the Tk thread through a queue.
@@ -7,6 +7,8 @@ import base64
 import json
 import os
 import queue
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -14,12 +16,13 @@ import tkinter.font as tkfont
 from datetime import datetime, timezone
 from tkinter import filedialog, messagebox, ttk
 
-from . import mdtk, net, providers, theme as themes, web
+from . import engine, mdtk, net, providers, theme as themes, web
+from .library import TEXT_TYPES, Library
 from .store import Store, new_id
 from .widgets import (Btn, NavItem, Panel, ScrollFrame, Slip, Tab, bind_wheel, entry, style_ttk, textbox)
 
+APP_NAME = "VSCode Assistant"
 ASSETS = themes.ASSETS
-TOOL_RESULT_LIMIT = 15000
 
 
 # ── Formatting helpers ─────────────────────────────────────────────────────
@@ -111,11 +114,7 @@ def fit_text(font, text, px):
     return text[:lo].rstrip() + "…"
 
 
-def split_model(v):
-    if not v or "::" not in v:
-        return None, None
-    a, b = v.split("::", 1)
-    return a, b
+split_model = engine.split_model
 
 
 # ── Message view ───────────────────────────────────────────────────────────
@@ -130,7 +129,9 @@ class MessageView(tk.Frame):
         if role == "tool":
             self._tool(head)
             return
-        who = "YOU" if role == "user" else (split_model(msg.get("model"))[1] or "MODEL").upper()
+        who = "You" if role == "user" else (split_model(msg.get("model"))[1] or "Model")
+        if th["name"] != "pro":
+            who = who.upper()
         dot = tk.Canvas(head, width=10, height=10, bg=th["bg"], highlightthickness=0)
         dot.create_polygon(5, 1, 9, 5, 5, 9, 1, 5, fill=th["sel"] if role == "user" else th["accent"])
         dot.pack(side="left", padx=(0, 6))
@@ -144,7 +145,7 @@ class MessageView(tk.Frame):
                 acts.append(("Retry", "regen"))
             acts.append(("Delete", "delete"))
             for label, act in reversed(acts):
-                b = tk.Label(head, text=label.upper(), font=f["sub"], bg=th["bg"], fg=th["faint"], cursor="hand2",
+                b = tk.Label(head, text=label if th["name"] == "pro" else label.upper(), font=f["sub"], bg=th["bg"], fg=th["faint"], cursor="hand2",
                              padx=6)
                 b.pack(side="right")
                 b.bind("<Button-1>", lambda e, a=act: app.message_action(a, idx))
@@ -153,7 +154,7 @@ class MessageView(tk.Frame):
 
         if role == "assistant" and msg.get("tool_calls") and not (msg.get("content") or "").strip() \
                 and not msg.get("thinking"):
-            tk.Label(self, text="→ using web tools", font=f["label"], bg=th["bg"], fg=th["faint"]).pack(anchor="w")
+            tk.Label(self, text="→ using tools", font=f["label"], bg=th["bg"], fg=th["faint"]).pack(anchor="w")
             return
 
         is_user = role == "user"
@@ -163,7 +164,7 @@ class MessageView(tk.Frame):
         bubble.pack(fill="x")
         edge = tk.Frame(bubble, bg=th["red"] if err else (th["sel"] if is_user else th["panel"]), width=2)
         edge.pack(side="left", fill="y")
-        if not is_user and not err:
+        if not is_user and not err and th["ticks"]:
             tk.Frame(bubble, bg=th["accent"], height=2, width=24).place(x=14, y=0)
         self.text = tk.Text(bubble, bg=bubble["bg"], fg=th["red"] if err else th["text"], font=f["body"],
                             relief="flat", wrap="word", padx=16, pady=12, height=1, width=10, bd=0,
@@ -227,7 +228,7 @@ class MessageView(tk.Frame):
             think, body, open_ = split_think(m.get("content", ""))
             think = "\n".join(x for x in (m.get("thinking", "").strip(), think) if x)
             if think:
-                t.insert("end", "R E A S O N I N G\n", "thinkhead")
+                t.insert("end", self.app.spaced("Reasoning") + "\n", "thinkhead")
                 shown = think if (live and (open_ or not body.strip())) or len(think) < 600 else think[:600] + "…"
                 t.insert("end", shown + "\n\n", "think")
             mdtk.render(t, body, th, self.app.f)
@@ -255,10 +256,13 @@ class App:
     def __init__(self):
         themes.register_fonts()
         self.root = tk.Tk()
-        self.root.title("Inkelus")
+        self.root.title(APP_NAME)
         self.root.geometry("1280x820")
         self.root.minsize(860, 600)
         self.store = Store()
+        self.library = Library(self.store.dir)
+        self.lib_kind = "documents"
+        self.lib_current = None   # name of the item open in the Library editor
         self.q = queue.Queue()
         self.models = {}          # conn id -> [model dict] or None
         self.active_id = self.store.chats[0]["id"] if self.store.chats else None
@@ -268,7 +272,7 @@ class App:
         self.pull_cancel = None
         self._last_paint = 0
         try:
-            self.icon = tk.PhotoImage(file=os.path.join(ASSETS, "enso_small.png"))
+            self.icon = tk.PhotoImage(file=os.path.join(ASSETS, "icon.png"))
             self.root.iconphoto(True, self.icon)
         except tk.TclError:
             pass
@@ -281,17 +285,24 @@ class App:
     def build(self):
         for w in self.root.winfo_children():
             w.destroy()
-        style = self.store.settings.get("style", "ink")
-        self.th = themes.STYLES.get(style, themes.INK)
+        style = self.store.settings.get("style", themes.DEFAULT_STYLE)
+        if style not in themes.STYLES:
+            style = themes.DEFAULT_STYLE
+        self.th = themes.STYLES[style]
         self.f = themes.fonts_for(style, set(tkfont.families(self.root)))
         self.label_font = tkfont.Font(root=self.root, font=self.f["label"])
         self.title_font = tkfont.Font(root=self.root, font=self.f["title"])
         th = self.th
         self.root.configure(bg=th["bg"])
         style_ttk(self.root, th, self.f)
-        self.bg_img = tk.PhotoImage(file=os.path.join(ASSETS, "bg_ink.png"))
-        self.enso = tk.PhotoImage(file=os.path.join(ASSETS, "enso.png"))
-        self.enso_small = tk.PhotoImage(file=os.path.join(ASSETS, "enso_small.png"))
+        if th["ornate"]:
+            self.bg_img = tk.PhotoImage(file=os.path.join(ASSETS, "bg_ink.png"))
+            self.logo = tk.PhotoImage(file=os.path.join(ASSETS, "enso.png"))
+            self.logo_small = tk.PhotoImage(file=os.path.join(ASSETS, "enso_small.png"))
+        else:
+            self.bg_img = None
+            self.logo = tk.PhotoImage(file=os.path.join(ASSETS, "logo.png"))
+            self.logo_small = tk.PhotoImage(file=os.path.join(ASSETS, "logo_small.png"))
 
         self.rail = tk.Frame(self.root, bg=th["rail"], width=250)
         self.rail.pack(side="left", fill="y")
@@ -300,11 +311,9 @@ class App:
         self.main = tk.Frame(self.root, bg=th["bg"])
         self.main.pack(side="left", fill="both", expand=True)
         self.build_rail()
-        self.views = {"chat": self.build_chat(), "models": self.build_models(), "settings": self.build_settings()}
+        self.views = {"chat": self.build_chat(), "models": self.build_models(), "library": self.build_library(),
+                      "settings": self.build_settings()}
         self.show_view("chat")
-
-    def title_text(self, s):
-        return s if self.th["name"] == "ink" else s.upper()
 
     def page_head(self, parent, title, sub):
         th, f = self.th, self.f
@@ -320,8 +329,9 @@ class App:
         box.pack(side="left", fill="x", expand=True)
         lab = tk.Label(box, text=self.spaced(title), font=f["title"], bg=th["bg"], fg=th["text"], anchor="w", width=1)
         lab.pack(anchor="w", fill="x")
-        tk.Label(box, text=sub.upper(), font=f["sub"], bg=th["bg"], fg=th["dim"], anchor="w", width=1).pack(
-            anchor="w", fill="x")
+        if th["name"] != "pro":
+            tk.Label(box, text=sub.upper(), font=f["sub"], bg=th["bg"], fg=th["dim"], anchor="w", width=1).pack(
+                anchor="w", fill="x")
         state = {"stacked": None}
 
         def relayout(e):
@@ -343,20 +353,24 @@ class App:
 
     def spaced(self, s):
         """Ink titles use wide letter-spacing; Tk can't track, so add hair spaces."""
-        return " ".join(s) if self.th["name"] == "ink" else s.upper()
+        return " ".join(s) if self.th["ornate"] else themes.case(self.th, s)
 
     # ── Rail ────────────────────────────────────────────────────────────
     def build_rail(self):
         th, f, r = self.th, self.f, self.rail
         brand = tk.Frame(r, bg=th["rail"])
         brand.pack(fill="x", padx=18, pady=(18, 14))
-        tk.Label(brand, image=self.enso_small, bg=th["rail"]).pack(side="left")
-        tk.Label(brand, text="I N K E L U S" if th["name"] == "ink" else "INKELUS", font=f["brand"],
-                 bg=th["rail"], fg=th["dim"], justify="left").pack(side="left", padx=10)
-        self.new_btn = Slip(r, th, f, "New", self.new_chat, sub="新しい会話", width=214, height=50)
+        tk.Label(brand, image=self.logo_small, bg=th["rail"]).pack(side="left")
+        tk.Label(brand, text=APP_NAME if th["name"] == "pro" else self.spaced(APP_NAME.upper()), font=f["brand"],
+                 bg=th["rail"], fg=th["text"] if th["name"] == "pro" else th["dim"], justify="left").pack(
+            side="left", padx=10)
+        if th["name"] == "pro":
+            self.new_btn = Slip(r, th, f, "New chat", self.new_chat, width=214, height=34)
+        else:
+            self.new_btn = Slip(r, th, f, "New", self.new_chat, sub="新しい会話", width=214, height=50)
         self.new_btn.pack(padx=18, pady=(0, 10))
         self.nav = {}
-        for key, label in (("chat", "Chat"), ("models", "Models"), ("settings", "Settings")):
+        for key, label in (("chat", "Chat"), ("models", "Models"), ("library", "Library"), ("settings", "Settings")):
             n = NavItem(r, th, f, key, label, self.show_view)
             n.pack(fill="x")
             self.nav[key] = n
@@ -410,7 +424,7 @@ class App:
             return
         for c in chats:
             active = c["id"] == self.active_id
-            bg = th["wash"] if active and th["name"] == "ink" else (th["panel_hi"] if active else th["rail"])
+            bg = th["wash"] if active and th["name"] != "glass" else (th["panel_hi"] if active else th["rail"])
             row = tk.Frame(inner, bg=bg, cursor="hand2")
             row.pack(fill="x")
             tk.Frame(row, bg=th["accent"] if active else bg, width=2).pack(side="left", fill="y")
@@ -441,6 +455,8 @@ class App:
         m.tk_popup(e.x_root, e.y_root)
 
     def show_view(self, name):
+        if getattr(self, "view", None) == "library" and name != "library" and not self.lib_confirm_leave():
+            return
         for k, v in self.views.items():
             if k == name:
                 v.pack(fill="both", expand=True)
@@ -453,6 +469,8 @@ class App:
             self.load_models_view()
         if name == "settings":
             self.fill_settings()
+        if name == "library":
+            self.load_library()
 
     # ── Chat view ───────────────────────────────────────────────────────
     def build_chat(self):
@@ -463,32 +481,22 @@ class App:
         self.title_lab.configure(cursor="xterm")
         self.title_lab.bind("<Button-1>", lambda e: self.rename_chat())
 
-        pick = tk.Frame(tools, bg=th["panel_2"], highlightthickness=1, highlightbackground=th["line_2"])
-        pick.pack(side="left", padx=(0, 8))
-        tk.Label(pick, text="MODEL", font=f["sub"], bg=th["panel_2"], fg=th["faint"]).pack(side="left", padx=(12, 4))
-        self.model_var = tk.StringVar()
-        self.model_box = ttk.Combobox(pick, textvariable=self.model_var, state="readonly", width=24, font=f["body"])
-        self.model_box.pack(side="left", padx=(0, 4), pady=2)
-        self.model_box.bind("<<ComboboxSelected>>", self.on_model_pick)
+        # the model picker lives in Settings; it's built there
+        self.model_box = None
         self.model_values = []
 
         self.browser_chip = tk.Label(tools, font=f["label"], padx=12, pady=6, cursor="hand2", highlightthickness=1)
         self.browser_chip.pack(side="left", padx=(0, 8))
         self.browser_chip.bind("<Button-1>", lambda e: self.toggle_browser())
+        self.agent_chip = tk.Label(tools, font=f["label"], padx=12, pady=6, cursor="hand2", highlightthickness=1)
+        self.agent_chip.pack(side="left", padx=(0, 8))
+        self.agent_chip.bind("<Button-1>", lambda e: self.toggle_agent())
+        self.library_btn = Btn(tools, th, f, "Library", self.context_dialog, small=True)
+        self.library_btn.pack(side="left", padx=(0, 8), fill="y")
         self.params_btn = Btn(tools, th, f, "Parameters", self.toggle_params, small=True)
         self.params_btn.pack(side="left", padx=(0, 8), fill="y")
         Btn(tools, th, f, "Export", lambda: self.export_chat(self.active()), small=True).pack(side="left", fill="y")
         self.title_lab.bind("<Configure>", lambda e: self.render_title(), add="+")
-        char_px = tkfont.Font(root=self.root, font=f["body"]).measure("0")
-
-        def fit_picker(e):
-            # on narrow windows the model picker gives up width so every button stays whole
-            others = tools.winfo_reqwidth() - self.model_box.winfo_reqwidth()
-            chars = max(10, min(24, (e.width - others - 40) // max(char_px, 1)))
-            if int(self.model_box.cget("width")) != chars:
-                self.model_box.configure(width=chars)
-
-        self.chat_head.bind("<Configure>", fit_picker, add="+")
 
         # parameters drawer
         self.params = Panel(v, th)
@@ -523,7 +531,8 @@ class App:
         # composer (packed before transcript so it keeps its height)
         comp = tk.Frame(v, bg=th["panel"], highlightthickness=1, highlightbackground=th["line"])
         comp.pack(side="bottom", fill="x", padx=28, pady=(8, 18))
-        tk.Frame(comp, bg=th["accent"], height=2, width=24).place(x=14, y=0)
+        if th["ticks"]:
+            tk.Frame(comp, bg=th["accent"], height=2, width=24).place(x=14, y=0)
         self.attach_row = tk.Frame(comp, bg=th["panel"])
         self.attach_row.pack(fill="x", padx=14)
         self.prompt = tk.Text(comp, bg=th["panel"], fg=th["text"], insertbackground=th["accent"], relief="flat",
@@ -540,7 +549,8 @@ class App:
         Btn(bar, th, f, "Attach image", self.attach, small=True).pack(side="left")
         self.stats_lab = tk.Label(bar, text="", font=f["small"], bg=th["panel"], fg=th["faint"])
         self.stats_lab.pack(side="left", padx=12)
-        self.send_btn = Slip(bar, th, f, "Send", self.send, width=160, height=40)
+        self.send_btn = Slip(bar, th, f, "Send", self.send, width=110 if th["name"] == "pro" else 160,
+                             height=32 if th["name"] == "pro" else 40)
         self.send_btn.pack(side="right")
 
         # transcript: a canvas with the ink backdrop and a frame of messages
@@ -551,7 +561,7 @@ class App:
         c.configure(yscrollcommand=lambda a, b: (sb.set(a, b), self.place_backdrop()))
         sb.pack(side="right", fill="y")
         c.pack(side="left", fill="both", expand=True)
-        self.bg_item = c.create_image(0, 0, image=self.bg_img, anchor="ne")
+        self.bg_item = c.create_image(0, 0, image=self.bg_img, anchor="ne") if self.bg_img else None
         self.msg_frame = tk.Frame(c, bg=th["bg"])
         self.msg_win = c.create_window(0, 0, window=self.msg_frame, anchor="n")
         self.msg_frame.bind("<Configure>", lambda e: self.queue_scrollregion())
@@ -585,6 +595,8 @@ class App:
         self.place_backdrop()
 
     def place_backdrop(self):
+        if self.bg_item is None:
+            return
         c = self.scroll_canvas
         c.coords(self.bg_item, c.winfo_width(), c.canvasy(0))
         c.tag_lower(self.bg_item)
@@ -646,6 +658,7 @@ class App:
             return
         if self.stream and self.stream["chat_id"] == cid:
             self.stream["cancel"].set()
+        engine.agent_for(self.store).close_chat(cid)
         self.store.chats.remove(c)
         if self.active_id == cid:
             self.active_id = self.store.chats[0]["id"] if self.store.chats else None
@@ -697,16 +710,21 @@ class App:
     def render_browser_chip(self):
         th = self.th
         c = self.active()
-        on = bool(c and c.get("browser"))
-        text = "Web · on" if on else "Web · off"
-        if th["name"] == "glass":
-            text = text.upper()
-        if on:
-            self.browser_chip.configure(text=text, bg=th["wash"] if th["name"] == "ink" else th["sel"],
-                                        fg=th["accent_2"] if th["name"] == "ink" else th["on_sel"],
-                                        highlightbackground=th["accent"])
-        else:
-            self.browser_chip.configure(text=text, bg=th["panel_2"], fg=th["dim"], highlightbackground=th["line_2"])
+        for chip, key, name in ((self.browser_chip, "browser", "Web"), (self.agent_chip, "agent", "Browser")):
+            on = bool(c and c.get(key))
+            text = themes.case(th, "%s · %s" % (name, "on" if on else "off"))
+            if on:
+                chip.configure(text=text, bg=th["wash"] if th["name"] == "ink" else th["sel"],
+                               fg=th["accent_2"] if th["name"] == "ink" else th["on_sel"],
+                               highlightbackground=th["accent"])
+            else:
+                chip.configure(text=text, bg=th["panel_2"], fg=th["dim"], highlightbackground=th["line_2"])
+
+    def render_library_btn(self):
+        c = self.active()
+        n = len([d for d in (c or {}).get("docs", []) if d in self.library.names("documents")])
+        self.library_btn.configure(text=themes.case(self.th, "Library · %d doc%s" % (n, "" if n == 1 else "s")
+                                                    if n else "Library"))
 
     def toggle_browser(self):
         c = self.active() or self.new_chat()
@@ -715,6 +733,14 @@ class App:
         self.render_browser_chip()
         self.toast("Web sandbox on: the model can search and read pages (read-only)." if c["browser"]
                    else "Web sandbox off for this chat.")
+
+    def toggle_agent(self):
+        c = self.active() or self.new_chat()
+        c["agent"] = not c.get("agent")
+        self.store.save_chats()
+        self.render_browser_chip()
+        self.toast("Browser on: the model can open pages, click and type in its own browser window. It asks "
+                   "before each action." if c["agent"] else "Browser off for this chat.")
 
     def toggle_params(self):
         if self.params.winfo_ismapped():
@@ -765,6 +791,8 @@ class App:
 
     # model picker
     def render_model_box(self):
+        if self.model_box is None:
+            return
         values, labels = [], []
         for cn in self.store.settings["connections"]:
             for m in self.models.get(cn["id"]) or []:
@@ -789,12 +817,14 @@ class App:
         c = self.active()
         if c and c.get("model"):
             return c["model"]
-        i = self.model_box.current() if hasattr(self, "model_box") else -1
+        i = self.model_box.current() if self.model_box is not None else -1
         if 0 <= i < len(self.model_values):
             return self.model_values[i]
         return self.store.settings.get("last_model", "")
 
     def on_model_pick(self, _e=None):
+        if self.model_box is None:
+            return
         i = self.model_box.current()
         if 0 <= i < len(self.model_values):
             v = self.model_values[i]
@@ -815,6 +845,7 @@ class App:
         c = self.active()
         self.render_title()
         self.render_browser_chip()
+        self.render_library_btn()
         self.fill_params()
         self.render_model_box()
         self.update_send_btn()
@@ -839,12 +870,18 @@ class App:
         if w < 10:
             w, h = 900, 500
         cx, cy = w / 2, h / 2 - 60
-        c.create_image(cx, cy, image=self.enso, tags="empty")
-        c.create_text(cx, cy + 96, text=self.spaced("Inkelus"), font=(f["title"][0], 22, "bold"),
-                      fill=th["text"], tags="empty")
-        c.create_text(cx, cy + 128, text="L O C A L   M O D E L S   ·   墨", font=f["sub"], fill=th["dim"], tags="empty")
-        c.create_line(cx - 40, cy + 146, cx + 40, cy + 146, fill=th["line_2"], tags="empty")
-        c.create_text(cx, cy + 172, text="Pick a model above and start writing. Turn on Web to let it search and "
+        c.create_image(cx, cy, image=self.logo, tags="empty")
+        if th["name"] == "pro":
+            c.create_text(cx, cy + 80, text=APP_NAME, font=(f["title"][0], 20, "bold"), fill=th["text"], tags="empty")
+            c.create_text(cx, cy + 110, text="Chat with your local models", font=f["body"], fill=th["dim"],
+                          tags="empty")
+        else:
+            c.create_text(cx, cy + 96, text=self.spaced(APP_NAME), font=(f["title"][0], 22, "bold"),
+                          fill=th["text"], tags="empty")
+            c.create_text(cx, cy + 128, text="L O C A L   M O D E L S   ·   墨", font=f["sub"], fill=th["dim"],
+                          tags="empty")
+            c.create_line(cx - 40, cy + 146, cx + 40, cy + 146, fill=th["line_2"], tags="empty")
+        c.create_text(cx, cy + 172, text="Pick a model in Settings and start writing. Turn on Web to let it search and "
                                          "read pages in a sandbox.", font=f["body"], fill=th["dim"], tags="empty", width=520,
                       justify="center")
         self.empty_items = True
@@ -964,82 +1001,21 @@ class App:
 
     def worker(self, c, conn, model, cancel):
         """Runs on a thread: model turn → tool calls → tool results → … → answer."""
-        prov = providers.create(conn)
-        bs = self.store.settings["web"]
-        tools = None
-        try:
-            if c.get("browser"):
-                tools = web.TOOLS if bs.get("allow_search", True) else \
-                    [t for t in web.TOOLS if t["function"]["name"] != "web_search"]
-                box = self.sandboxes.setdefault(c["id"], web.Sandbox())
-                box.allow_private = bool(bs.get("allow_private"))
-                box.allow_search = bool(bs.get("allow_search", True))
-            steps = int(bs.get("max_steps") or 12)
-            for step in range(steps + 1):
-                history = []
-                system = (c["params"].get("system") or "").strip()
-                if tools:
-                    system = (system + "\n\n" if system else "") + web.SYSTEM_PROMPT
-                if system:
-                    history.append({"role": "system", "content": system})
-                history += [m for m in c["messages"] if not m.get("error") and m["role"] != "note"]
-                reply = {"role": "assistant", "content": "", "thinking": "", "model": c["model"]}
-                c["messages"].append(reply)
-                self.post("rerender", c["id"])
+        cid = c["id"]
 
-                def on_delta(text, think, r=reply):
-                    r["content"] += text
-                    if think:
-                        r["thinking"] += think
-                    self.post("delta", c["id"])
+        def emit(kind, *args):
+            if kind == "update":
+                self.post("rerender", cid)
+            elif kind == "delta":
+                self.post("delta", cid)
+            elif kind == "done":
+                self.post("done", cid, args[0])
+            elif kind == "toast":
+                self.post("toast", args[0], True)
 
-                calls, stats = prov.chat(model, history, c["params"], on_delta, cancel,
-                                         tools=tools if step < steps else None,
-                                         keep_alive=self.store.settings["defaults"].get("keep_alive") or None)
-                reply["stats"] = stats
-                if not calls:
-                    if not reply["content"].strip() and not reply["thinking"]:
-                        reply["content"] = "_(empty reply)_"
-                    self.post("done", c["id"], stats)
-                    return
-                reply["tool_calls"] = calls
-                for call in calls:
-                    if cancel.is_set():
-                        raise net.Cancelled()
-                    res = {"role": "tool", "name": call["name"], "tool_call_id": call["id"],
-                           "arguments": call["arguments"], "content": "", "status": "running"}
-                    c["messages"].append(res)
-                    self.post("rerender", c["id"])
-                    if call["name"] not in web.TOOL_NAMES or not tools:
-                        res.update(content="Unknown tool %s." % call["name"], status="error", is_error=True)
-                        continue
-                    if bs.get("confirm", True) and not c.get("allow_all_tools") and not self.ask_tool(c, call, cancel):
-                        res.update(content="The user declined this web action.", status="denied", is_error=True)
-                        continue
-                    try:
-                        text, is_err = box.run(call["name"], call["arguments"]), False
-                    except Exception as e:  # report tool failures back to the model
-                        text, is_err = "Tool error: %s" % e, True
-                    if len(text) > TOOL_RESULT_LIMIT:
-                        text = text[:TOOL_RESULT_LIMIT] + "\n…[truncated %d chars]" % (len(text) - TOOL_RESULT_LIMIT)
-                    res.update(content=text, status="error" if is_err else "done", is_error=is_err)
-                    self.post("rerender", c["id"])
-            self.post("done", c["id"], None)
-        except net.Cancelled:
-            last = c["messages"][-1] if c["messages"] else None
-            if last and last["role"] == "assistant":
-                last["content"] += ("\n\n" if last["content"] else "") + "_— stopped —_"
-            elif last and last["role"] == "tool" and last.get("status") == "running":
-                last.update(status="cancelled", content="Cancelled by the user.", is_error=True)
-            self.post("done", c["id"], "stopped")
-        except Exception as e:
-            last = c["messages"][-1] if c["messages"] else None
-            if last and last["role"] == "assistant" and not last["content"] and not last.get("tool_calls"):
-                last["error"] = str(e)
-            else:
-                c["messages"].append({"role": "assistant", "content": "", "error": str(e), "model": c["model"]})
-            self.post("done", c["id"], "error")
-            self.post("toast", str(e), True)
+        box = self.sandboxes.setdefault(cid, web.Sandbox()) if c.get("browser") else None
+        agent = engine.agent_for(self.store) if c.get("agent") else None
+        engine.run_turn(self.store, self.library, c, conn, model, cancel, emit, self.ask_tool, box, agent)
 
     def ask_tool(self, c, call, cancel):
         """Ask on the Tk thread whether to run a browser action; blocks the worker."""
@@ -1055,15 +1031,18 @@ class App:
     def show_confirm(self, cid, call, ev, box):
         th, f = self.th, self.f
         d = tk.Toplevel(self.root, bg=th["panel_2"])
-        d.title("Web action")
+        is_agent = call["name"].startswith("browser_")
+        d.title("Browser action" if is_agent else "Web action")
         d.transient(self.root)
         d.resizable(False, False)
         tk.Frame(d, bg=th["accent"], height=3, width=34).place(x=18, y=0)
         body = tk.Frame(d, bg=th["panel_2"])
         body.pack(padx=24, pady=20, fill="both")
-        tk.Label(body, text=self.title_text("Allow web action?"), font=f["h2"], bg=th["panel_2"],
+        tk.Label(body, text=themes.case(self.th, "Allow browser action?" if is_agent else "Allow web action?"),
+                 font=f["h2"], bg=th["panel_2"],
                  fg=th["text"]).pack(anchor="w")
-        tk.Label(body, text="The model wants to use the sandbox browser (read-only):", font=f["label"], bg=th["panel_2"],
+        tk.Label(body, text="The model wants to act in the agent browser window:" if is_agent else
+                 "The model wants to use the sandbox browser (read-only):", font=f["label"], bg=th["panel_2"],
                  fg=th["dim"]).pack(anchor="w", pady=(6, 8))
         tk.Label(body, text=call["name"], font=(f["mono"][0], f["mono"][1] + 1, "bold"), bg=th["panel_2"],
                  fg=th["accent_2"]).pack(anchor="w")
@@ -1225,7 +1204,7 @@ class App:
         def table(title, sub, cols, height):
             hdr = tk.Frame(body, bg=th["bg"])
             hdr.pack(fill="x", pady=(4, 8))
-            tk.Label(hdr, text=self.title_text(title), font=f["h2"], bg=th["bg"], fg=th["text"]).pack(side="left")
+            tk.Label(hdr, text=themes.case(self.th, title), font=f["h2"], bg=th["bg"], fg=th["text"]).pack(side="left")
             tk.Label(hdr, text=sub.upper(), font=f["sub"], bg=th["bg"], fg=th["dim"]).pack(side="left", padx=12)
             panel = tk.Frame(body, bg=th["panel_2"], highlightthickness=1, highlightbackground=th["line"])
             panel.pack(fill="x", pady=(0, 6), padx=(0, 16))
@@ -1397,7 +1376,7 @@ class App:
         if not name or not conn:
             return
         cancel = self.pull_cancel = threading.Event()
-        self.pull_btn.configure(text="Cancel" if self.th["name"] == "ink" else "CANCEL")
+        self.pull_btn.configure(text=themes.case(self.th, "Cancel"))
         self.pull_bar.pack(fill="x", pady=(12, 0), before=self.pull_status)
         self.pull_bar["value"] = 0
         self.pull_status.configure(text="Starting…")
@@ -1429,13 +1408,318 @@ class App:
 
     def _pull_done(self, msg, ok):
         self.pull_cancel = None
-        self.pull_btn.configure(text="Pull" if self.th["name"] == "ink" else "PULL")
+        self.pull_btn.configure(text=themes.case(self.th, "Pull"))
         self.pull_status.configure(text=msg)
         self.root.after(1500, lambda: self.pull_cancel is None and self.pull_bar.pack_forget())
         if ok:
             self.pull_var.set("")
             self.toast(msg)
             self.load_models_view()
+
+    # ── Library view ────────────────────────────────────────────────────
+    LIB_HINTS = {
+        "documents": "Reference material the AI can read: notes, specs, policies, code. Choose which documents "
+                     "a chat uses with the Library button in the chat header.",
+        "templates": "Examples of how answers should look. Use headings, tables and {{placeholders}}; the AI "
+                     "copies the layout and fills in the blanks. In Auto mode (the default) it sees every "
+                     "template and picks the one that fits the request.",
+    }
+
+    def build_library(self):
+        th, f = self.th, self.f
+        v = tk.Frame(self.main, bg=th["bg"])
+        _lab, tools = self.page_head(v, "Library", "Documents and templates · 書庫")
+        self.lib_tabs = {}
+        for key, name in (("documents", "Documents"), ("templates", "Templates")):
+            t = Tab(tools, th, f, name, lambda k=key: self.switch_library(k))
+            t.pack(side="left", padx=(0, 6))
+            self.lib_tabs[key] = t
+
+        body = tk.Frame(v, bg=th["bg"])
+        body.pack(fill="both", expand=True, padx=28, pady=(0, 18))
+
+        # left: the list of items
+        left = Panel(body, th, width=270)
+        left.pack(side="left", fill="y", padx=(0, 16))
+        left.pack_propagate(False)
+        lb = left.body
+        self.lib_count = tk.Label(lb, font=f["label"], bg=th["panel"], fg=th["dim"], anchor="w")
+        self.lib_count.pack(fill="x", pady=(0, 8))
+        row = tk.Frame(lb, bg=th["panel"])
+        row.pack(side="bottom", fill="x", pady=(10, 0))
+        Btn(row, th, f, "New", self.lib_new, kind="primary", small=True).pack(side="left")
+        Btn(row, th, f, "Import…", self.lib_import, small=True).pack(side="left", padx=6)
+        Btn(row, th, f, "Folder", self.lib_open_folder, small=True).pack(side="left")
+        wrap = tk.Frame(lb, bg=th["panel_2"], highlightthickness=1, highlightbackground=th["line"])
+        wrap.pack(fill="both", expand=True)
+        self.lib_list = tk.Listbox(wrap, bg=th["panel_2"], fg=th["text"], font=f["label"], relief="flat", bd=0,
+                                   highlightthickness=0, activestyle="none", exportselection=False,
+                                   selectbackground=th["wash"] if th["name"] != "glass" else th["sel"],
+                                   selectforeground=th["text"] if th["name"] != "glass" else th["on_sel"])
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.lib_list.yview, style="Ink.Vertical.TScrollbar")
+        self.lib_list.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.lib_list.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+        self.lib_list.bind("<<ListboxSelect>>", self.lib_select)
+
+        # right: the editor
+        right = Panel(body, th)
+        right.pack(side="left", fill="both", expand=True)
+        rb = right.body
+        self.lib_hint = tk.Label(rb, font=f["small"], bg=th["panel"], fg=th["faint"], justify="left", anchor="w")
+        self.lib_hint.pack(fill="x", pady=(0, 10))
+        self.lib_hint.bind("<Configure>", lambda e: self.lib_hint.configure(wraplength=max(e.width - 6, 200)))
+        tk.Label(rb, text="Name", font=f["label"], bg=th["panel"], fg=th["dim"]).pack(anchor="w")
+        self.lib_name = tk.StringVar()
+        entry(rb, th, f, textvariable=self.lib_name).pack(fill="x", ipady=4, pady=(4, 10))
+        bar = tk.Frame(rb, bg=th["panel"])
+        bar.pack(side="bottom", fill="x", pady=(10, 0))
+        Btn(bar, th, f, "Delete", self.lib_delete, kind="danger").pack(side="left")
+        self.lib_status = tk.Label(bar, font=f["small"], bg=th["panel"], fg=th["faint"])
+        self.lib_status.pack(side="left", padx=12)
+        Btn(bar, th, f, "Save", self.lib_save, kind="primary").pack(side="right")
+        self.lib_text = tk.Text(rb, bg=th["input"], fg=th["text"], insertbackground=th["accent"], relief="flat",
+                                font=f["mono"], wrap="word", padx=12, pady=10, undo=True, highlightthickness=1,
+                                highlightbackground=th["line_2"], highlightcolor=th["accent"],
+                                selectbackground=th["accent"], selectforeground=th["on_accent"])
+        self.lib_text.pack(fill="both", expand=True)
+        self.lib_text.bind("<<Modified>>", self.lib_modified)
+        self.lib_name.trace_add("write", lambda *a: self.lib_mark_dirty())
+        self.lib_text.bind("<Control-s>", lambda e: (self.lib_save(), "break")[1])
+        self.lib_dirty = False
+        return v
+
+    def switch_library(self, kind):
+        if kind == self.lib_kind or not self.lib_confirm_leave():
+            return
+        self.lib_kind = kind
+        self.lib_current = None
+        self.load_library()
+
+    def load_library(self, select=None):
+        th = self.th
+        kind = self.lib_kind
+        for k, t in self.lib_tabs.items():
+            t.set_active(k == kind)
+        self.lib_hint.configure(text=self.LIB_HINTS[kind])
+        names = self.library.names(kind)
+        self.lib_list.delete(0, "end")
+        for n in names:
+            self.lib_list.insert("end", "  " + n)
+        label = "document" if kind == "documents" else "template"
+        self.lib_count.configure(text="%d %s%s" % (len(names), label, "" if len(names) == 1 else "s"))
+        name = select or self.lib_current
+        if name not in names:
+            name = names[0] if names else None
+        if name:
+            i = names.index(name)
+            self.lib_list.selection_clear(0, "end")
+            self.lib_list.selection_set(i)
+            self.lib_list.see(i)
+        self.lib_open(name)
+        self.lib_status.configure(text="", fg=th["faint"])
+
+    def lib_open(self, name):
+        self.lib_current = name
+        self._lib_filling = True
+        self.lib_name.set(name or "")
+        self.lib_text.delete("1.0", "end")
+        if name:
+            self.lib_text.insert("1.0", self.library.read(self.lib_kind, name))
+        self.lib_text.edit_reset()
+        self.lib_text.edit_modified(False)
+        self._lib_filling = False
+        self.lib_dirty = False
+
+    def lib_modified(self, _e=None):
+        if self.lib_text.edit_modified():
+            self.lib_mark_dirty()
+
+    def lib_mark_dirty(self):
+        if getattr(self, "_lib_filling", False):
+            return
+        self.lib_dirty = True
+        self.lib_status.configure(text="Unsaved changes", fg=self.th["faint"])
+
+    def lib_confirm_leave(self):
+        """Offer to save before the open item is replaced. False means stay put."""
+        if not getattr(self, "lib_dirty", False):
+            return True
+        ans = messagebox.askyesnocancel("Unsaved changes", "Save changes to %s?" % (
+            self.lib_name.get().strip() or "this item"), parent=self.root)
+        if ans is None:
+            return False
+        if ans:
+            return self.lib_save()
+        self.lib_dirty = False
+        return True
+
+    def lib_select(self, _e=None):
+        sel = self.lib_list.curselection()
+        if not sel:
+            return
+        name = self.lib_list.get(sel[0]).strip()
+        if name == self.lib_current:
+            return
+        if not self.lib_confirm_leave():
+            names = self.library.names(self.lib_kind)
+            self.lib_list.selection_clear(0, "end")
+            if self.lib_current in names:
+                self.lib_list.selection_set(names.index(self.lib_current))
+            return
+        self.lib_open(name)
+
+    def lib_save(self):
+        kind, name = self.lib_kind, self.lib_name.get().strip()
+        text = self.lib_text.get("1.0", "end-1c")
+        try:
+            if self.lib_current and name != self.lib_current:
+                name = self.library.rename(kind, self.lib_current, name)
+                self.rename_in_chats(kind, self.lib_current, name)
+            name = self.library.save(kind, name, text)
+        except (OSError, ValueError) as e:
+            self.lib_status.configure(text=str(e), fg=self.th["red"])
+            return False
+        self.lib_dirty = False
+        self.lib_current = name
+        self.load_library(select=name)
+        self.lib_status.configure(text="Saved", fg=self.th["green"])
+        self.render_library_btn()
+        return True
+
+    def lib_new(self):
+        if not self.lib_confirm_leave():
+            return
+        base = "New document" if self.lib_kind == "documents" else "New template"
+        names, name, n = set(self.library.names(self.lib_kind)), base + ".md", 2
+        while name in names:
+            name, n = "%s %d.md" % (base, n), n + 1
+        self.library.save(self.lib_kind, name, "")
+        self.lib_current = name
+        self.load_library(select=name)
+        self.lib_text.focus_set()
+
+    def lib_import(self):
+        if not self.lib_confirm_leave():
+            return
+        paths = filedialog.askopenfilenames(parent=self.root, title="Import into the library", filetypes=TEXT_TYPES)
+        last, errors = None, []
+        for p in paths:
+            try:
+                last = self.library.import_file(self.lib_kind, p)
+            except Exception as e:
+                errors.append("%s: %s" % (os.path.basename(p), e))
+        if last:
+            self.lib_current = last
+            self.load_library(select=last)
+        if errors:
+            self.toast("Couldn't import " + "; ".join(errors), bad=True)
+        elif paths:
+            self.toast("Imported %d file%s" % (len(paths), "" if len(paths) == 1 else "s"))
+
+    def lib_delete(self):
+        name = self.lib_current
+        if not name or not messagebox.askyesno("Delete", 'Delete "%s" from the library?' % name, parent=self.root):
+            return
+        self.library.delete(self.lib_kind, name)
+        self.lib_current = None
+        self.lib_dirty = False
+        self.load_library()
+        self.render_library_btn()
+
+    def lib_open_folder(self):
+        path = self.library.dir(self.lib_kind)
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # noqa: S606 - opens the user's own data folder
+            else:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path])
+        except (OSError, AttributeError):
+            self.dialog("Library folder", path)
+
+    def rename_in_chats(self, kind, old, new):
+        changed = False
+        for c in self.store.chats:
+            if kind == "documents" and old in c.get("docs", []):
+                c["docs"] = [new if d == old else d for d in c["docs"]]
+                changed = True
+            if kind == "templates" and c.get("template") == old:
+                c["template"] = new
+                changed = True
+        if changed:
+            self.store.save_chats()
+
+    def context_dialog(self):
+        """Choose which Library documents and template the current chat uses."""
+        th, f = self.th, self.f
+        c = self.active() or self.new_chat()
+        docs, temps = self.library.names("documents"), self.library.names("templates")
+        d = tk.Toplevel(self.root, bg=th["panel_2"])
+        d.title("Library for this chat")
+        d.transient(self.root)
+        d.resizable(False, False)
+        if th["ticks"]:
+            tk.Frame(d, bg=th["accent"], height=3, width=34).place(x=18, y=0)
+        body = tk.Frame(d, bg=th["panel_2"])
+        body.pack(padx=24, pady=20, fill="both")
+
+        def heading(text, pad=0):
+            tk.Label(body, text=themes.case(th, text), font=f["h2"], bg=th["panel_2"], fg=th["text"]).pack(
+                anchor="w", pady=(pad, 4))
+
+        def note(text):
+            tk.Label(body, text=text, font=f["small"], bg=th["panel_2"], fg=th["faint"], justify="left",
+                     wraplength=440).pack(anchor="w", pady=(0, 6))
+
+        heading("Documents")
+        note("The AI reads the documents you tick, in this chat only.")
+        doc_vars = {}
+        box = ScrollFrame(body, th, bg=th["panel_2"])
+        box.canvas.configure(height=min(max(len(docs), 1), 8) * 28, width=440)
+        box.pack(fill="x")
+        for name in docs:
+            var = tk.BooleanVar(value=name in c.get("docs", []))
+            tk.Checkbutton(box.inner, text=name, variable=var, font=f["label"], bg=th["panel_2"], fg=th["text"],
+                           selectcolor=th["input"], activebackground=th["panel_2"], activeforeground=th["text"],
+                           highlightthickness=0, anchor="w").pack(fill="x")
+            doc_vars[name] = var
+        if not docs:
+            tk.Label(box.inner, text="No documents yet. Add some on the Library page.", font=f["label"],
+                     bg=th["panel_2"], fg=th["dim"]).pack(anchor="w")
+
+        heading("Template", 14)
+        note("Auto lets the AI see every template and use the one that fits the request.")
+        tvar = tk.StringVar(value=c.get("template", "auto") if c.get("template", "auto") in
+                            ["auto", ""] + temps else "auto")
+        opts = [("Auto: pick the matching template", "auto"), ("None", "")] + [(t, t) for t in temps]
+        for label, val in opts:
+            tk.Radiobutton(body, text=label, value=val, variable=tvar, font=f["label"], bg=th["panel_2"],
+                           fg=th["text"], selectcolor=th["input"], activebackground=th["panel_2"],
+                           activeforeground=th["text"], highlightthickness=0, anchor="w").pack(fill="x")
+
+        def apply():
+            c["docs"] = [n for n, v in doc_vars.items() if v.get()]
+            c["template"] = tvar.get()
+            self.store.save_chats()
+            self.render_library_btn()
+            d.destroy()
+
+        def manage():
+            d.destroy()
+            self.show_view("library")
+
+        row = tk.Frame(body, bg=th["panel_2"])
+        row.pack(fill="x", pady=(16, 0))
+        Btn(row, th, f, "Open Library", manage).pack(side="left")
+        Btn(row, th, f, "Done", apply, kind="primary").pack(side="right")
+        Btn(row, th, f, "Cancel", d.destroy).pack(side="right", padx=8)
+        d.bind("<Escape>", lambda e: d.destroy())
+        d.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - d.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - d.winfo_height()) // 3
+        d.geometry("+%d+%d" % (max(x, 0), max(y, 0)))
+        d.grab_set()
+        d.focus_set()
 
     # ── Settings view ───────────────────────────────────────────────────
     def build_settings(self):
@@ -1456,23 +1740,34 @@ class App:
             lab.bind("<Configure>", lambda e: lab.configure(wraplength=max(e.width - 6, 200)))
             return lab
 
+        # model
+        p = Panel(body, th, "Model", f)
+        p.pack(fill="x", pady=(0, 16), padx=(0, 16))
+        self.model_var = tk.StringVar()
+        self.model_box = ttk.Combobox(p.body, textvariable=self.model_var, state="readonly", font=f["body"])
+        self.model_box.pack(fill="x")
+        self.model_box.bind("<<ComboboxSelected>>", self.on_model_pick)
+        hint(p.body, "Used by the current chat and by new chats. Add or pull models on the Models page.")
+        self.render_model_box()
+
         # style
         p = Panel(body, th, "Interface style", f)
         p.pack(fill="x", pady=(0, 16), padx=(0, 16))
         row = tk.Frame(p.body, bg=th["panel"])
         row.pack(anchor="w")
         self.style_tabs = {}
-        for key, name in (("ink", "Ink"), ("glass", "Glass")):
+        for key, name in (("pro", "Professional"), ("ink", "Ink"), ("glass", "Glass")):
             t = Tab(row, th, f, name, lambda k=key: self.set_style(k))
             t.pack(side="left", padx=(0, 6))
             self.style_tabs[key] = t
-        hint(p.body, "Ink: charcoal, cream paper and gold with serif type. "
+        hint(p.body, "Professional: neutral dark greys, a blue accent and clean sans type. "
+                     "Ink: charcoal, cream paper and gold with serif type. "
                      "Glass: dark slate tiles, condensed type and a yellow accent.")
 
         # web sandbox
         p = Panel(body, th, "Web sandbox", f)
         p.pack(fill="x", pady=(0, 16), padx=(0, 16))
-        hint(p.body, "Inkelus has its own built-in, read-only browser for the model. It is not BrowserOS and never "
+        hint(p.body, APP_NAME + " has its own built-in, read-only browser for the model. It is not BrowserOS and never "
                      "touches any browser on this computer: no cookies or logins, no JavaScript, no forms, "
                      "nothing saved to disk. It can search (DuckDuckGo), open pages, follow links and find text. "
                      "Turn it on per chat with the Web button in the chat header. Needs a model that supports "
@@ -1551,8 +1846,9 @@ class App:
 
     def fill_settings(self):
         s = self.store.settings
+        self.render_model_box()
         for k, t in self.style_tabs.items():
-            t.set_active(k == s.get("style", "ink"))
+            t.set_active(k == s.get("style", themes.DEFAULT_STYLE))
         ws = s["web"]
         self._filling_web = True
         for key, var in self.web_vars.items():
@@ -1699,22 +1995,13 @@ class App:
                                             filetypes=[("Markdown", "*.md")])
         if not path:
             return
-        out = ["# " + c["title"], ""]
-        for m in c["messages"]:
-            if m["role"] == "tool":
-                out += ["> ⚙ `%s` %s" % (m.get("name"), json.dumps(m.get("arguments") or {})), ""]
-                continue
-            who = "You" if m["role"] == "user" else (split_model(m.get("model"))[1] or "Assistant")
-            body = "> Error: " + m["error"] if m.get("error") else m.get("content", "")
-            if body.strip():
-                out += ["### " + who, "", body, ""]
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(out))
+            fh.write(engine.chat_markdown(c))
         self.toast("Exported")
 
     def export_all(self):
         path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".json",
-                                            initialfile="inkelus-backup.json", filetypes=[("JSON", "*.json")])
+                                            initialfile="vscode-assistant-backup.json", filetypes=[("JSON", "*.json")])
         if path:
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump({"version": 2, "chats": self.store.chats}, fh, ensure_ascii=False, indent=1)
@@ -1727,21 +2014,10 @@ class App:
         try:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
-            incoming = data if isinstance(data, list) else data.get("chats")
-            have = {c["id"] for c in self.store.chats}
-            added = [c for c in incoming or [] if isinstance(c, dict) and c.get("id") and
-                     isinstance(c.get("messages"), list) and c["id"] not in have]
-            for c in added:
-                c.setdefault("params", {"system": "", "temperature": 0.7, "top_p": 0.9})
-                c.setdefault("updated", time.time())
-                c.setdefault("title", "Imported")
-                # the web version stored images as data: URLs
-                for m in c["messages"]:
-                    m["images"] = [i.split(",", 1)[-1] for i in m.get("images") or []]
-            self.store.chats.extend(added)
+            n = engine.import_chats(self.store, data)
             self.store.save_chats()
             self.render_convos()
-            self.toast("Imported %d conversation%s" % (len(added), "" if len(added) == 1 else "s"))
+            self.toast("Imported %d conversation%s" % (n, "" if n == 1 else "s"))
         except (OSError, ValueError, AttributeError) as e:
             self.toast("Import failed: %s" % e, bad=True)
 
@@ -1775,7 +2051,7 @@ class App:
         d.transient(self.root)
         d.geometry("680x520")
         tk.Frame(d, bg=th["accent"], height=3, width=34).place(x=18, y=0)
-        tk.Label(d, text=self.title_text(title), font=f["h2"], bg=th["panel_2"], fg=th["text"]).pack(
+        tk.Label(d, text=themes.case(self.th, title), font=f["h2"], bg=th["panel_2"], fg=th["text"]).pack(
             anchor="w", padx=24, pady=(20, 10))
         t = tk.Text(d, bg=th["code_bg"], fg=th["text"], font=f["mono"], relief="flat", padx=12, pady=10,
                     highlightthickness=0, wrap="word")

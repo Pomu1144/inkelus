@@ -1,4 +1,4 @@
-"""Inkelus's built-in sandbox browser: read-only web tools for the model.
+"""VSCode Assistant's built-in sandbox browser: read-only web tools for the model.
 
 This is NOT BrowserOS and never touches any browser on your computer. It is
 a tiny text-only fetcher written on the standard library:
@@ -26,7 +26,7 @@ from html.parser import HTMLParser
 MAX_BYTES = 3 * 1024 * 1024
 PAGE_CHARS = 8000
 MAX_LINKS = 40
-UA = "Mozilla/5.0 (compatible; Inkelus/2.0; text-only reader)"
+UA = "Mozilla/5.0 (compatible; VSCodeAssistant/2.0; text-only reader)"
 TEXT_TYPES = ("text/", "application/json", "application/xml", "application/xhtml", "application/rss",
               "application/atom", "application/ld+json")
 
@@ -61,7 +61,7 @@ TOOLS = [
 TOOL_NAMES = [t["function"]["name"] for t in TOOLS]
 
 SYSTEM_PROMPT = (
-    "You have a sandboxed, read-only web browser (Inkelus web tools). Use web_search to find pages, "
+    "You have a sandboxed, read-only web browser (VSCode Assistant web tools). Use web_search to find pages, "
     "open_page or follow_link to read them, read_more for long pages and find_in_page to locate details. "
     "It shows page text only: no JavaScript, logins or forms. Base answers on what you read, and cite "
     "the URLs you used."

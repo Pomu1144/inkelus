@@ -1,14 +1,19 @@
-# Inkelus
+# VSCode Assistant
 
 A desktop chat app for your local LLMs, written in pure Python. It uses only
 tkinter and the standard library: no pip installs, no Node, and no admin
 rights needed. It includes its own **sandbox browser**, so a model can search
 the web and read pages without touching any browser on your computer.
 
-It is styled after the **Ink** and **Glass** interface styles from NXBNVNB.
-Ink is charcoal ink, cream paper and gold, with serif type, thin square frames
-and a left rail where the active item gets a gold wash. Glass uses dark slate
-tiles, condensed type and a yellow accent. You switch between them in Settings.
+It has three interface styles, which you switch between in **Settings ›
+Interface style**:
+
+- **Professional** (the default): neutral dark editor greys, a blue accent,
+  clean sans type and flat controls.
+- **Ink**: charcoal ink, cream paper and gold, with serif type, thin square
+  frames and ink artwork (from NXBNVNB).
+- **Glass**: dark slate tiles, condensed type and a yellow accent (from
+  NXBNVNB).
 
 ## Run it
 
@@ -17,7 +22,7 @@ python run.py
 ```
 
 On Windows you can also double-click **`run.pyw`**, which opens without a
-console window. `python -m inkelus` works too.
+console window. `python -m vscode_assistant` works too.
 
 You need **Python 3.8+ with Tk**. The python.org installers for Windows and
 macOS include Tk. On Linux, install your distro's `python3-tk` package if
@@ -25,6 +30,38 @@ macOS include Tk. On Linux, install your distro's `python3-tk` package if
 
 Then start [Ollama](https://ollama.com) and pull a model from the
 **Models** screen, for example `qwen2.5:1.5b`.
+
+### In your browser (faster)
+
+```bash
+python run_web.py
+```
+
+On Windows you can double-click **`run_web.pyw`** instead. This starts a small
+server on your own computer (`http://127.0.0.1:8765`, never reachable from
+other machines) and opens the app in Chrome as its own window, or in Edge or
+your default browser if Chrome isn't installed. `python -m vscode_assistant
+--web` works too. Options:
+
+- `--tab`: open as a normal browser tab instead of an app window
+- `--no-open`: just start the server; open the printed address yourself
+- `--port 9000`: use a different port
+- `--keep-running`: don't stop when the last app window closes
+
+The browser version has everything the desktop window has: streaming chat,
+Markdown with copyable code blocks, the web sandbox, the Library, models and
+settings. Its default **Warm dark** theme gives it a calm chat look: charcoal
+greys, a clay accent, rounded shapes, serif replies in one centred column, and
+a greeting on the start page. **Blue dark** (the desktop window's look),
+**Light** and **Match system** are in **Settings › Appearance**. You can also
+paste or drag images into the message box. It uses the same data folder, so your chats, settings and
+Library are shared. Don't run both at the same time, or the one you close
+last overwrites the other's changes.
+
+The server stops by itself about 30 seconds after you close the last app
+window (unless a reply or a model download is still running). Launching it
+again while it's running just reopens the window. You can also press `Ctrl+C`
+in its console.
 
 ## Features
 
@@ -47,9 +84,110 @@ Then start [Ollama](https://ollama.com) and pull a model from the
   - Load or unload a model.
   - View a model's details: template, parameters, license, context length.
   - Pull new models with a progress bar, and delete models.
+- **Library**: a place to keep **documents** (reference material the AI
+  can read) and **templates** (examples of how answers should be laid out).
+  See [Library](#library) below.
 - **Multiple servers**: Ollama, plus OpenAI-compatible servers (LM Studio,
   llama.cpp `llama-server`, vLLM, LocalAI, Jan…). Models from every server
-  appear in one picker.
+  appear in one picker under **Settings › Model**.
+
+## Library
+
+Open **Library** in the left rail. It has two tabs:
+
+- **Documents**: notes, specs, policies, code, anything the AI should know
+  about. Create them in the editor, or click **Import…** to add text files
+  (`.txt`, `.md`, `.csv`, `.json`, source code…) or Word `.docx` files, which
+  are converted to text.
+- **Templates**: examples of how an answer should look. Write them with
+  headings, tables and `{{placeholders}}`; the AI copies the layout and fills
+  in the blanks. Three examples come with the app: meeting notes, a bug
+  report and an email.
+
+In a chat, click **Library** in the header to choose:
+
+- which **documents** the AI reads in that chat, and
+- which **template** it follows. **Auto** (the default) lets the AI see every
+  template and use the one that matches the request (ask for "a bug report
+  about…" and it uses *Bug report*). You can also pin one template, or choose
+  **None**.
+
+Documents and templates are plain files in the `documents` and `templates`
+folders inside your data folder (the **Folder** button opens it), so you can
+also edit them with any editor. With Ollama, the app enlarges the context
+window when documents are attached so they aren't cut off; set **Context
+(num_ctx)** under **Parameters** to choose it yourself.
+
+## Agent browser
+
+Click **Browser · off** in a chat's header to let the model use a real
+browser window: open pages, click, type, choose options and press keys. It
+works like an AI browser assistant, but it's built into this app and stands
+on its own:
+
+- It starts your installed **Chrome** (or Edge or Chromium) as a separate
+  window with its **own private profile** in the app's data folder
+  (`agent-browser`). It shares no history, cookies, logins or extensions with
+  your everyday browser or any other browser app.
+- It controls that window over Chrome's built-in DevTools protocol on a
+  random local port, using only Python's standard library.
+- Each chat gets its own tab. You can watch everything it does, and use the
+  window yourself at any time.
+
+How the model sees and uses a page:
+
+- **Page outline from the accessibility tree.** Each page arrives as an
+  indented outline of roles, names, states and text, the same structure
+  screen readers use, so it stays clear on modern sites. Everything it can
+  use carries a short ref like `[e12]`.
+- **Clickable things without a proper role** (a `<div>` with a click
+  handler or pointer cursor, common in web apps) are found and listed too.
+- **Only the changes after each action.** After a click or typing, the model
+  gets just the lines that changed when that's shorter than the whole page,
+  so long tasks fit in small local models.
+- **Real input.** Clicks are real mouse events at the element's position,
+  and typing clears the field and types key by key, so sites that listen to
+  keystrokes work.
+- **Stable refs.** Refs stay the same until the page changes to a new
+  document. If an element is rebuilt, it's found again by its role and name.
+  After each action it waits for the page to load and stop changing.
+- **Pop-up dialogs.** Alerts are closed and reported. Confirm and prompt
+  dialogs are handed to the model to answer, which you approve like any
+  other action.
+
+| Tool | What it does |
+|---|---|
+| `browser_open` | Opens a URL |
+| `browser_snapshot` | Gets the full page outline again |
+| `browser_click` | Clicks a link, button, tab, clickable item… |
+| `browser_type` | Clears a text field and types into it, optionally pressing Enter |
+| `browser_select` | Chooses an option in a dropdown |
+| `browser_check` | Ticks or unticks a checkbox, radio button or switch |
+| `browser_press` | Presses a key or shortcut (Enter, Escape, Tab, arrows, `Control+a`…) |
+| `browser_scroll` | Scrolls the page or a scrollable element |
+| `browser_back` | Goes back a page |
+| `browser_find` | Searches the page's text |
+| `browser_dialog` | Answers a confirm or prompt dialog |
+
+Safety:
+
+- By default you **approve every action that changes something** (opening,
+  clicking, typing…); just reading the page doesn't ask. Change this in
+  **Settings › Agent browser** (browser version) to ask for every step, or
+  never.
+- It **can't type into password fields**. To use sites that need a login,
+  click **Open the agent browser** in Settings (or turn Browser on and let it
+  open), log in yourself, and the private profile remembers it.
+- Page content is fenced with markers that carry a fresh random code each
+  time, so a page can't fake the end of its own content. The model is told
+  never to follow instructions found inside, and to ask you before buying,
+  posting, sending or deleting anything.
+
+You need a model that supports tool calling; bigger models (7B+) handle
+multi-step browsing much better than tiny ones. On some work computers,
+company policy blocks Chrome's remote control (`RemoteDebuggingAllowed`); the
+app tells you if that happens. Set the browser path in Settings, or the
+`VSCODE_ASSISTANT_CHROME` environment variable, if it can't find Chrome.
 
 ## Web sandbox
 
@@ -99,17 +237,19 @@ tool calls.
 
 ## Work laptops
 
-- **Nothing to install** beyond Python. The bundled fonts (Kaisei Tokumin,
-  Cinzel, Inter, Oswald) are loaded for this app's process only, not
+- **Nothing to install** beyond Python. The bundled fonts (Inter, Kaisei
+  Tokumin, Cinzel, Oswald) are loaded for this app's process only, not
   installed system-wide. If that's blocked, the app falls back to Georgia or
   Segoe UI.
 - **Corporate proxies**:
   - Requests to your model servers on `localhost` skip any `HTTP(S)_PROXY`
     setting.
   - The web sandbox goes through your proxy like any other app.
-- **Your data** stays in your user folder: `%APPDATA%\Inkelus` on Windows,
-  `~/Library/Application Support/Inkelus` on macOS, `~/.config/inkelus` on
-  Linux. Set `INKELUS_HOME` to use a different folder.
+- **Your data** stays in your user folder: `%APPDATA%\VSCode Assistant` on
+  Windows, `~/Library/Application Support/VSCode Assistant` on macOS,
+  `~/.config/vscode-assistant` on Linux. Set `VSCODE_ASSISTANT_HOME` to use a
+  different folder. If you used the app when it was called Inkelus, its
+  existing folder keeps being used, so your chats carry over.
 
 ## Keyboard
 
@@ -120,14 +260,20 @@ tool calls.
 ## Files
 
 ```
-run.py / run.pyw          start the app
-inkelus/app.py            window, views, chat + tool loop
-inkelus/providers.py      Ollama + OpenAI-compatible clients (streaming, tool calls)
-inkelus/web.py            the sandbox browser (read-only web tools)
-inkelus/mdtk.py           Markdown → Tk text renderer
-inkelus/widgets.py        Ink/Glass widgets: paper slip button, nav rail rows, panels
-inkelus/theme.py          Ink and Glass palettes, font loading
-inkelus/net.py            urllib helpers
-inkelus/store.py          settings + chats on disk
-inkelus/assets/           fonts and ink art from NXBNVNB
+run.py / run.pyw                 start the app
+run_web.py / run_web.pyw        start the browser version
+vscode_assistant/app.py         the desktop window and its views
+vscode_assistant/server.py      the browser version: local web server + JSON API
+vscode_assistant/static/        the browser version's page, styles and scripts
+vscode_assistant/engine.py      the chat + tool loop, shared by both versions
+vscode_assistant/providers.py   Ollama + OpenAI-compatible clients (streaming, tool calls)
+vscode_assistant/web.py         the sandbox browser (read-only web tools)
+vscode_assistant/agent_browser.py  the agent browser: drives a Chrome window over DevTools
+vscode_assistant/mdtk.py        Markdown → Tk text renderer
+vscode_assistant/widgets.py     styled widgets: main button, nav rail rows, panels
+vscode_assistant/theme.py       Professional, Ink and Glass palettes, font loading
+vscode_assistant/net.py         urllib helpers
+vscode_assistant/store.py       settings + chats on disk
+vscode_assistant/library.py     documents + templates, and the prompt text they add
+vscode_assistant/assets/        app icon, fonts, and ink art from NXBNVNB
 ```
