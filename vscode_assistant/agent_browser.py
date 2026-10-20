@@ -808,8 +808,8 @@ class Tab:
         if urlsplit(url).scheme != "https" and host not in ("localhost", "127.0.0.1"):
             raise PermissionError("Saved logins are only filled on secure (https) pages.")
         if provider is None:
-            raise PermissionError("Saved passwords are only available in the browser version of the app "
-                                  "(run_web.py). Ask the user to log in themselves in the browser window.")
+            raise PermissionError("Saved passwords aren't available right now. Ask the user to log in themselves "
+                                  "in the browser window.")
         cred = provider(chat_id, host, url, list(fields))
         if not cred:
             return self.observe("The user didn't provide a saved login (declined, or none is saved for %s). "

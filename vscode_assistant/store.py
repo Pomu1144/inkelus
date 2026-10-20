@@ -34,8 +34,6 @@ def data_dir():
 
 
 DEFAULT_SETTINGS = {
-    "style": "pro",
-    "ui_version": 2,
     "connections": [{"id": "ollama", "name": "Ollama", "type": "ollama", "url": "http://localhost:11434", "key": ""}],
     "default_conn": "ollama",
     "last_model": "",
@@ -65,8 +63,6 @@ class Store:
         self.settings_path = os.path.join(self.dir, "settings.json")
         self.chats_path = os.path.join(self.dir, "chats.json")
         saved = self._load(self.settings_path, {})
-        if isinstance(saved, dict) and saved and saved.get("ui_version", 1) < 2:
-            saved["style"] = "pro"  # move pre-rename installs onto the new default look once
         self.settings = self._merge(DEFAULT_SETTINGS, saved)
         self.chats = self._load(self.chats_path, [])
         if not isinstance(self.chats, list):

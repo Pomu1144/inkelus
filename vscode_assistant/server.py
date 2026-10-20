@@ -1,11 +1,11 @@
-"""The browser version: a small local web server for the same app.
+"""The command center: a small local web server that runs the whole app.
 
-    python run_web.py          (or double-click run_web.pyw on Windows)
-    python -m vscode_assistant --web [--port 8765] [--no-open]
+    python run.py              (or double-click run.pyw on Windows)
+    python -m vscode_assistant [--port 8765] [--no-open] [--tab] [--keep-running]
 
 It listens on 127.0.0.1 only and opens the app in your browser (Chrome if it
-can find it). Chats, settings and the Library are the same files the
-desktop window uses. Standard library only, like the rest of the app.
+can find it). It opens further windows of its own when needed (the agent
+browser). Standard library only, like the rest of the app.
 
 Every API call must carry the random token that is baked into the page, and
 the Host header must be localhost, so other web pages can't drive it.
@@ -751,7 +751,7 @@ def already_running(port):
 
 
 def say(text):
-    if sys.stdout is not None:  # pythonw (run_web.pyw) has no console
+    if sys.stdout is not None:  # pythonw (run.pyw) has no console
         print(text, flush=True)
 
 
@@ -781,7 +781,7 @@ def serve(port=8765, open_page=True, app_window=True, idle_exit=True):
     if idle_exit:
         def watchdog():
             # once a page has connected, stop when every app window has been closed for a while
-            # and nothing is generating, so a double-clicked run_web.pyw doesn't linger
+            # and nothing is generating, so a double-clicked run.pyw doesn't linger
             while True:
                 time.sleep(5)
                 with hub.lock:
@@ -807,5 +807,6 @@ def main(argv=None):
     ap.add_argument("--no-open", action="store_true", help="don't open a browser window")
     ap.add_argument("--tab", action="store_true", help="open as a normal browser tab instead of an app window")
     ap.add_argument("--keep-running", action="store_true", help="don't stop when the last app window closes")
+    ap.add_argument("--web", action="store_true", help=argparse.SUPPRESS)  # older launch command; now the only mode
     a = ap.parse_args(argv)
     serve(a.port, not a.no_open, not a.tab, idle_exit=not (a.keep_running or a.no_open))

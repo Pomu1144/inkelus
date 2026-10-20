@@ -1,9 +1,9 @@
-"""The chat turn, shared by the desktop window and the browser version.
+"""The chat turn: model, tools, results, repeat.
 
 run_turn() talks to the model, runs any web-sandbox tool calls it asks for,
 feeds the results back, and repeats until the model answers in plain text.
 It runs on a worker thread and reports through callbacks, so it knows
-nothing about Tk or HTTP.
+nothing about HTTP or the page.
 """
 import json
 
