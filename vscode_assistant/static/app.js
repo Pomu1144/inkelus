@@ -9,7 +9,7 @@
   const S = {
     settings: null, chats: [], library: { documents: [], templates: [] }, dataDir: "",
     view: "chat", activeId: null, chat: null, busy: new Set(),
-    models: [], images: [], libKind: "documents", libCurrent: null, libDirty: false,
+    models: [], images: [], started: {}, libKind: "documents", libCurrent: null, libDirty: false,
     search: "", searchIds: null,
   };
 
@@ -103,7 +103,8 @@
       }
     } else if (ev.type === "chat") {
       upsertSummary(ev.chat);
-      if (ev.chat.busy) S.busy.add(ev.chat.id); else S.busy.delete(ev.chat.id);
+      if (ev.chat.busy) { S.busy.add(ev.chat.id); S.started[ev.chat.id] = S.started[ev.chat.id] || Date.now(); }
+      else { S.busy.delete(ev.chat.id); delete S.started[ev.chat.id]; }
       if (S.chat && ev.chat.id === S.chat.id) {
         S.chat.messages = ev.messages;
         S.chat.title = ev.chat.title;
@@ -139,17 +140,77 @@
   }
 
   // ── Rail ─────────────────────────────────────────────────────────────
+  // Chats are listed in groups the user names and fills by dragging; "General" holds the rest.
+  function groups() { return (S.settings && S.settings.groups) || []; }
+
   function renderRail() {
     const list = $("#chatList");
     const chats = S.searchIds ? S.chats.filter(c => S.searchIds.has(c.id)) : S.chats;
-    if (!chats.length) {
-      list.innerHTML = '<p class="faint small" style="padding:8px 20px">' + (S.searchIds ? "No matches." : "No conversations yet.") + "</p>";
-      return;
+    const known = new Set(groups().map(g => g.id));
+    const item = c => '<div class="chat-item' + (c.id === S.activeId ? " active" : "") + '" draggable="true" data-id="' +
+      esc(c.id) + '"><span>' + esc(c.title) + "</span>" + (S.busy.has(c.id) ? '<i class="busy"></i>' : "") +
+      '<button class="x" title="Delete" data-del="' + esc(c.id) + '">✕</button></div>';
+    const section = (gid, name, members, collapsed, custom) => {
+      if (S.searchIds && !members.length) return "";
+      return '<div class="group' + (collapsed ? " collapsed" : "") + '" data-gid="' + esc(gid) + '">' +
+        '<div class="group-head" data-gid="' + esc(gid) + '"><span class="gcaret">' + (collapsed ? "▸" : "▾") + "</span>" +
+        '<span class="gname">' + esc(name) + '</span><span class="gcount">' + members.length + "</span>" +
+        '<span class="gacts"><button class="icon-btn" data-gact="new" title="New chat in ' + esc(name) + '">+</button>' +
+        (custom ? '<button class="icon-btn" data-gact="rename" title="Rename">✎</button>' +
+                  '<button class="icon-btn" data-gact="delete" title="Delete group">✕</button>' : "") + "</span></div>" +
+        '<div class="group-body">' + (collapsed ? "" : members.map(item).join("") ||
+          '<p class="drop-hint">Drag chats here</p>') + "</div></div>";
+    };
+    let html = groups().map(g => section(g.id, g.name, chats.filter(c => c.group === g.id), g.collapsed, true)).join("");
+    const general = chats.filter(c => !c.group || !known.has(c.group));
+    html += section("", "General", general, !!S.generalCollapsed, false);
+    if (!chats.length && !groups().length) {
+      html = '<p class="faint small" style="padding:8px 20px">' + (S.searchIds ? "No matches." : "No conversations yet.") + "</p>";
     }
-    list.innerHTML = chats.map(c =>
-      '<div class="chat-item' + (c.id === S.activeId ? " active" : "") + '" data-id="' + esc(c.id) + '">' +
-      "<span>" + esc(c.title) + "</span>" + (S.busy.has(c.id) ? '<i class="busy"></i>' : "") +
-      '<button class="x" title="Delete" data-del="' + esc(c.id) + '">✕</button></div>').join("");
+    list.innerHTML = html;
+  }
+
+  async function saveGroups(gs) {
+    await patchSettings({ groups: gs });
+    S.chats.forEach(c => { if (c.group && !gs.some(g => g.id === c.group)) c.group = ""; });
+    renderRail();
+  }
+
+  function renameGroup(gid, isNew) {
+    const head = $('#chatList .group-head[data-gid="' + CSS.escape(gid) + '"]');
+    const g = groups().find(x => x.id === gid);
+    if (!head || !g) return;
+    const span = head.querySelector(".gname");
+    const inp = document.createElement("input");
+    inp.className = "gname-edit";
+    inp.value = g.name;
+    span.replaceWith(inp);
+    inp.focus();
+    inp.select();
+    let done = false;
+    const finish = guard(async save => {
+      if (done) return;
+      done = true;
+      const name = inp.value.trim();
+      if (save && name) await saveGroups(groups().map(x => x.id === gid ? Object.assign({}, x, { name }) : x));
+      else if (isNew && !name) await saveGroups(groups().filter(x => x.id !== gid));
+      else renderRail();
+    });
+    inp.onkeydown = e => { if (e.key === "Enter") finish(true); if (e.key === "Escape") finish(false); };
+    inp.onblur = () => finish(true);
+    inp.onclick = e => e.stopPropagation();
+  }
+
+  async function moveChat(id, gid) {
+    const c = S.chats.find(x => x.id === id);
+    if (!c || (c.group || "") === gid) return;
+    await api("PATCH", "chats/" + id, { group: gid });
+    c.group = gid;
+    if (S.chat && S.chat.id === id) S.chat.group = gid;
+    const g = groups().find(x => x.id === gid);
+    if (g && g.collapsed) await saveGroups(groups().map(x => x.id === gid ? Object.assign({}, x, { collapsed: false }) : x));
+    renderRail();
+    toast("Moved to " + (g ? g.name : "General"));
   }
 
   function showView(name) {
@@ -177,9 +238,17 @@
     try { localStorage.setItem("va-active", id); } catch (_) { /* private window */ }
   }
 
-  async function newChat(model) {
+  async function newChat(model, group) {
     const r = await api("POST", "chats", { model: model || currentModel() });
-    upsertSummary({ id: r.chat.id, title: r.chat.title, updated: r.chat.updated, model: r.chat.model });
+    let fast = false;
+    try { fast = localStorage.getItem("va-fast") === "1"; } catch (_) { /* private window */ }
+    if (group || fast) {
+      const patch = {};
+      if (group) patch.group = group;
+      if (fast) patch.params = { fast: true };
+      r.chat = (await api("PATCH", "chats/" + r.chat.id, patch)).chat;
+    }
+    upsertSummary({ id: r.chat.id, title: r.chat.title, updated: r.chat.updated, model: r.chat.model, group: r.chat.group || "" });
     S.activeId = r.chat.id;
     S.chat = r.chat;
     renderChat();
@@ -212,6 +281,7 @@
     $("#agentBtn").classList.toggle("on", ag);
     const docs = c ? (c.docs || []).filter(d => S.library.documents.includes(d)).length : 0;
     $("#libBtn").textContent = docs ? "Library · " + docs + " doc" + (docs === 1 ? "" : "s") : "Library";
+    $("#fastBtn").classList.toggle("on", !!(c && c.params && c.params.fast));
     fillParams();
     updateSend();
     const msgs = c ? c.messages : [];
@@ -230,7 +300,8 @@
       const res = (m.content || "").trim();
       return '<div class="tool' + (m.is_error ? " err" : "") + '"><div class="t-head"><span class="name">⚙ ' +
         esc(m.name || "tool") + '</span><span class="args">' + esc(args) + '</span><span class="st' +
-        (st === "error" || st === "denied" ? " bad" : "") + '">' + esc(st) + "</span></div>" +
+        (st === "error" || st === "denied" ? " bad" : "") + '">' + (st === "running" ? '<i class="spin"></i>' : "") +
+        esc(st) + "</span></div>" +
         (res ? '<div class="res" title="Click to expand">' + esc(res.slice(0, 6000)) + "</div>" : "") + "</div>";
     }
     if (m.role === "assistant" && m.tool_calls && !(m.content || "").trim() && !m.thinking) {
@@ -263,16 +334,28 @@
     delete: svg("M3 4.5h10M6.5 4.5v-2h3v2M4.5 4.5l.7 9h5.6l.7-9"),
   };
 
+  // Shown in a reply until its first words arrive: what the model is doing and for how long.
+  function working(label) {
+    const id = S.chat ? S.chat.id : "";
+    const secs = S.started[id] ? Math.floor((Date.now() - S.started[id]) / 1000) : 0;
+    return '<div class="working"><span class="orb"></span><span class="wl">' + esc(label) + '</span>' +
+      '<span class="dots"><i></i><i></i><i></i></span><span class="secs">' + secs + "s</span></div>";
+  }
+
   function assistantBody(m, live) {
     const [inlineThink, text, open] = MD.splitThink(m.content || "");
     const think = [(m.thinking || "").trim(), inlineThink.trim()].filter(Boolean).join("\n");
     let h = "";
+    if (live && !text.trim()) {
+      const fast = S.chat && S.chat.params && S.chat.params.fast;
+      h += working(think ? "Thinking" : fast ? "Answering" : "Working");
+    }
     if (think) {
       const showOpen = live && (open || !text.trim());
       h += '<details class="think"' + (showOpen ? " open" : "") + "><summary>Reasoning</summary><div>" + esc(think) + "</div></details>";
     }
     h += MD.render(text);
-    if (live) h += '<span class="caret">▌</span>';
+    if (live && text.trim()) h += '<span class="caret">▌</span>';
     return h;
   }
 
@@ -318,6 +401,7 @@
     autosize();
     try {
       S.busy.add(c.id);
+      S.started[c.id] = Date.now();
       updateSend();
       await api("POST", "chats/" + c.id + "/send", { text, images, model });
     } catch (e) {
@@ -349,6 +433,7 @@
       $("#prompt").focus();
     } else if (act === "regen") {
       S.busy.add(c.id);
+      S.started[c.id] = Date.now();
       S.chat = (await api("POST", "chats/" + c.id + "/action", { act: "regen", index: i, model: currentModel() })).chat;
     }
     renderChat();
@@ -357,7 +442,7 @@
   async function patchChat(fields) {
     const c = await ensureChat();
     S.chat = (await api("PATCH", "chats/" + c.id, fields)).chat;
-    upsertSummary({ id: S.chat.id, title: S.chat.title, updated: S.chat.updated, model: S.chat.model });
+    upsertSummary({ id: S.chat.id, title: S.chat.title, updated: S.chat.updated, model: S.chat.model, group: S.chat.group || "" });
     return S.chat;
   }
 
@@ -822,8 +907,66 @@
         renderRail();
         return;
       }
+      const gact = e.target.closest("[data-gact]");
+      if (gact) {
+        e.stopPropagation();
+        const gid = gact.closest(".group-head").dataset.gid;
+        const g = groups().find(x => x.id === gid);
+        if (gact.dataset.gact === "new") await newChat(null, gid);
+        else if (gact.dataset.gact === "rename") renameGroup(gid);
+        else if (gact.dataset.gact === "delete" && g &&
+                 confirm('Delete the group "' + g.name + '"? Its chats move to General.')) {
+          await saveGroups(groups().filter(x => x.id !== gid));
+        }
+        return;
+      }
+      const head = e.target.closest(".group-head");
+      if (head) {
+        const gid = head.dataset.gid;
+        if (!gid) { S.generalCollapsed = !S.generalCollapsed; renderRail(); return; }
+        await saveGroups(groups().map(x => x.id === gid ? Object.assign({}, x, { collapsed: !x.collapsed }) : x));
+        return;
+      }
       const item = e.target.closest(".chat-item");
       if (item) await openChat(item.dataset.id);
+    });
+    $("#chatList").ondblclick = e => {
+      const head = e.target.closest(".group-head");
+      if (head && head.dataset.gid && e.target.closest(".gname")) renameGroup(head.dataset.gid);
+    };
+    $("#newGroup").onclick = guard(async () => {
+      const id = "g" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      await saveGroups(groups().concat([{ id, name: "New group", collapsed: false }]));
+      renameGroup(id, true);
+    });
+    // drag a chat onto a group (its header or its list) to move it there
+    const rail = $("#chatList");
+    rail.addEventListener("dragstart", e => {
+      const it = e.target.closest && e.target.closest(".chat-item");
+      if (!it) return;
+      e.dataTransfer.setData("text/x-chat", it.dataset.id);
+      e.dataTransfer.effectAllowed = "move";
+      it.classList.add("dragging");
+    });
+    rail.addEventListener("dragend", () => $$(".dragging, .drop-on").forEach(x => x.classList.remove("dragging", "drop-on")));
+    rail.addEventListener("dragover", e => {
+      const grp = e.target.closest(".group");
+      if (!grp || !e.dataTransfer.types.includes("text/x-chat")) return;
+      e.preventDefault();
+      $$(".drop-on").forEach(x => x !== grp && x.classList.remove("drop-on"));
+      grp.classList.add("drop-on");
+    });
+    rail.addEventListener("dragleave", e => {
+      const grp = e.target.closest(".group");
+      if (grp && !grp.contains(e.relatedTarget)) grp.classList.remove("drop-on");
+    });
+    rail.addEventListener("drop", e => {
+      const grp = e.target.closest(".group");
+      const id = e.dataTransfer.getData("text/x-chat");
+      $$(".drop-on").forEach(x => x.classList.remove("drop-on"));
+      if (!grp || !id) return;
+      e.preventDefault();
+      guard(moveChat)(id, grp.dataset.gid);
     });
     let searchTimer;
     $("#search").oninput = () => {
@@ -843,6 +986,15 @@
       toast(c.browser ? "Web sandbox on: the model can search and read pages (read-only)." : "Web sandbox off for this chat.");
     });
     $("#libBtn").onclick = guard(libraryDialog);
+    $("#fastBtn").onclick = guard(async () => {
+      const c = await ensureChat();
+      const on = !(c.params && c.params.fast);
+      await patchChat({ params: { fast: on } });
+      try { localStorage.setItem("va-fast", on ? "1" : "0"); } catch (_) { /* private window */ }
+      renderChat();
+      toast(on ? "Fast mode on: the model skips its reasoning step and answers straight away."
+               : "Fast mode off: reasoning models think before answering.");
+    });
     $("#agentBtn").onclick = guard(async () => {
       const c = await patchChat({ agent: !(S.chat && S.chat.agent) });
       renderChat();
@@ -1063,5 +1215,9 @@
     await guard(openChat)(first && first.id);
     refreshModels();
     setInterval(refreshModels, 60000);
+    setInterval(() => {   // keep the "Thinking… 12s" counters ticking
+      const t0 = S.chat && S.started[S.chat.id];
+      if (t0) $$("#messages .working .secs").forEach(el => (el.textContent = Math.floor((Date.now() - t0) / 1000) + "s"));
+    }, 250);
   })();
 })();

@@ -168,7 +168,7 @@ class Hub:
 
 def chat_summary(c, hub):
     return {"id": c["id"], "title": c["title"], "updated": c.get("updated", 0), "model": c.get("model", ""),
-            "busy": c["id"] in hub.streams}
+            "busy": c["id"] in hub.streams, "group": c.get("group") or ""}
 
 
 def public_settings(s):
@@ -365,7 +365,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.ok({"chat": c, "busy": c["id"] in h.streams})
             if method == "PATCH":
                 b = self.body()
-                for k in ("title", "model", "browser", "agent", "docs", "template"):
+                for k in ("title", "model", "browser", "agent", "docs", "template", "group"):
                     if k in b:
                         c[k] = b[k]
                 if "title" in b:
@@ -540,6 +540,21 @@ class Handler(BaseHTTPRequestHandler):
             for k in ("system", "keep_alive"):
                 if k in b["defaults"]:
                     s["defaults"][k] = str(b["defaults"][k])
+        if isinstance(b.get("groups"), list):
+            groups = []
+            for g in b["groups"][:100]:
+                if isinstance(g, dict) and str(g.get("id") or "").strip() and str(g.get("name") or "").strip():
+                    groups.append({"id": str(g["id"])[:40], "name": str(g["name"]).strip()[:60],
+                                   "collapsed": bool(g.get("collapsed"))})
+            s["groups"] = groups
+            known = {g["id"] for g in groups}
+            moved = False
+            for c in h.store.chats:   # chats in a deleted group go back to General
+                if c.get("group") and c["group"] not in known:
+                    c["group"] = ""
+                    moved = True
+            if moved:
+                h.save_chats()
         for k in ("last_model", "default_conn", "web_theme"):
             if k in b:
                 s[k] = b[k]

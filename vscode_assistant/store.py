@@ -46,6 +46,7 @@ DEFAULT_SETTINGS = {
         "allow_private": False,   # refuse localhost / intranet addresses
         "max_steps": 8,
     },
+    "groups": [],                 # chat groups in the sidebar: [{"id", "name", "collapsed"}]
     "agent": {                    # the agent browser (a real Chrome window the model can drive)
         "confirm": "actions",     # "actions": ask before clicks/typing/opening; "all"; "none"
         "chrome_path": "",        # empty: find Chrome / Edge / Chromium automatically

@@ -124,8 +124,16 @@ class Ollama(Base):
             body["tools"] = tools
         if keep_alive:
             body["keep_alive"] = keep_alive
+        if params.get("fast"):
+            body["think"] = False   # reasoning models (qwen3, deepseek-r1…) answer straight away
         calls, stats = [], {}
-        r = net.open_url(self.base + "/api/chat", "POST", body, self.headers(), timeout=600)
+        try:
+            r = net.open_url(self.base + "/api/chat", "POST", body, self.headers(), timeout=600)
+        except net.HTTPError as e:
+            if "think" not in body or "think" not in str(e).lower():
+                raise
+            body.pop("think")       # an older Ollama, or a model that can't switch thinking off
+            r = net.open_url(self.base + "/api/chat", "POST", body, self.headers(), timeout=600)
         with r:
             for line in net.iter_lines(r, cancel):
                 try:
@@ -198,10 +206,19 @@ class OpenAICompat(Base):
             body["temperature"] = 0
         if tools:
             body["tools"] = tools
+        if params.get("fast"):
+            # understood by llama.cpp, vLLM and others for models with a thinking switch (e.g. Qwen3)
+            body["chat_template_kwargs"] = {"enable_thinking": False}
         t0 = time.time()
         first, chunks, usage = 0, 0, None
         acc = {}  # tool-call deltas by index
-        r = net.open_url(self.p("/chat/completions"), "POST", body, self.headers(), timeout=600)
+        try:
+            r = net.open_url(self.p("/chat/completions"), "POST", body, self.headers(), timeout=600)
+        except net.HTTPError as e:
+            if "chat_template_kwargs" not in body or e.status not in (400, 422):
+                raise
+            body.pop("chat_template_kwargs")   # this server doesn't take it: ask again without
+            r = net.open_url(self.p("/chat/completions"), "POST", body, self.headers(), timeout=600)
         with r:
             for line in net.iter_lines(r, cancel):
                 if not line.startswith("data:"):

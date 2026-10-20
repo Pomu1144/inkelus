@@ -91,6 +91,25 @@ in its console.
   llama.cpp `llama-server`, vLLM, LocalAI, Jan…). Models from every server
   appear in one picker under **Settings › Model**.
 
+## Chat groups, Fast mode and the thinking indicator (browser version)
+
+- **Groups.** Click **+** next to *Recents* to make a group and type its name
+  (a project, a class, "Work"…). Drag chats onto a group to move them;
+  chats not in a group are under **General**. Click a group's name to
+  collapse it; hover it to start a new chat in it (**+**), rename it (**✎**,
+  or double-click the name) or delete it (**✕**; its chats move back to
+  General).
+- **Fast mode.** The **⚡ Fast** button by the message box tells reasoning
+  models (qwen3, deepseek-r1…) to skip their thinking step and answer straight
+  away. It's remembered per chat and used for new chats until you switch it
+  off. Ollama gets `think: false`; OpenAI-compatible servers get
+  `enable_thinking: false` (llama.cpp, vLLM). If a server doesn't support it,
+  the request is simply sent again without it.
+- **Thinking indicator.** Until the first words of a reply arrive, it shows
+  an animated *Working*, *Thinking* (while a reasoning model reasons) or
+  *Answering* (in Fast mode) with a seconds counter. Running tool steps show
+  a small spinner.
+
 ## Library
 
 Open **Library** in the left rail. It has two tabs:

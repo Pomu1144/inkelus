@@ -20,7 +20,8 @@
       <a data-view="passwords"><svg viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>Passwords</a>
       <a data-view="settings"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15M3 3l1.8 1.8M11.2 11.2L13 13M3 13l1.8-1.8M11.2 4.8L13 3"/></svg>Settings</a>
     </nav>
-    <div class="chats-head"><span>Recents</span><input id="search" type="search" placeholder="Search" aria-label="Search chats"></div>
+    <div class="chats-head"><span>Recents</span><input id="search" type="search" placeholder="Search" aria-label="Search chats">
+      <button class="icon-btn" id="newGroup" title="New group">+</button></div>
     <div class="chat-list" id="chatList"></div>
     <div class="status"><i id="statusDot"></i><span id="statusText">Connecting…</span></div>
   </aside>
@@ -60,6 +61,7 @@
         <textarea id="prompt" rows="2" placeholder="Write to the model…   (Enter to send, Shift+Enter for a new line)"></textarea>
         <div class="bar">
           <label class="btn small attach" title="Attach images"><input type="file" id="attach" accept="image/*" multiple hidden><span class="plus-i">+</span><span class="lbl">Attach image</span></label>
+          <button class="btn small fast" type="button" id="fastBtn" title="Fast: skip the model's reasoning step for quicker answers">⚡ Fast</button>
           <span class="faint small" id="stats"></span>
           <button class="btn primary send" id="sendBtn" type="submit" title="Send (Enter)"><span class="lbl">Send</span><svg class="ico-send" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/></svg><svg class="ico-stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/></svg></button>
         </div>
