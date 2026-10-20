@@ -51,9 +51,32 @@ class Hub:
         self.sandboxes = {}         # chat id -> web.Sandbox
         self.confirms = {}          # confirm id -> {"event", "ok", "all", "chat"}
         self.pulls = {}             # "conn::model" -> cancel Event
+        self.cred_requests = {}     # request id -> {"event", "answer", "chat", "host", "url", "fields"}
         self._last_push = {}
         self.seen_client = False
         self.last_client = time.time()
+        engine.agent_for(self.store).credential_provider = self.request_credential
+
+    # saved logins
+    def request_credential(self, chat_id, host, url, fields):
+        """Ask the open app window for a saved login for `host`. Blocks until the user answers
+        (unlocking the vault and approving, or declining). The secret is used once and not kept."""
+        rid = secrets.token_hex(8)
+        ev = threading.Event()
+        req = self.cred_requests[rid] = {"event": ev, "answer": None, "chat": chat_id, "host": host,
+                                         "url": url, "fields": fields}
+        self.publish({"type": "credential_request", "id": rid, "chat_id": chat_id, "host": host, "url": url,
+                      "fields": fields})
+        try:
+            end = time.time() + 600
+            while not ev.wait(0.25):
+                cancel = self.streams.get(chat_id)
+                if cancel is None or cancel.is_set() or time.time() > end:
+                    return None
+            return req["answer"]
+        finally:
+            self.cred_requests.pop(rid, None)
+            self.publish({"type": "credential_done", "id": rid})
 
     # events
     def publish(self, ev):
@@ -286,6 +309,8 @@ class Handler(BaseHTTPRequestHandler):
         # replay pending confirmations so a reloaded page can still answer them
         pending = [{"type": "confirm", "id": rid, "chat_id": v["chat"], "call": v.get("call")}
                    for rid, v in list(self.hub.confirms.items()) if v.get("call")]
+        pending += [{"type": "credential_request", "id": rid, "chat_id": v["chat"], "host": v["host"],
+                     "url": v["url"], "fields": v["fields"]} for rid, v in list(self.hub.cred_requests.items())]
         try:
             for ev in pending:
                 q.put(ev)
@@ -551,6 +576,55 @@ class Handler(BaseHTTPRequestHandler):
                 s["default_conn"] = s["connections"][0]["id"] if s["connections"] else None
             h.save_settings()
             return self.ok({"settings": public_settings(s)})
+        return self.fail(405, "Method not allowed")
+
+    def api_vault(self, method, parts, query):
+        """The encrypted password vault. Encryption happens in the page (Web Crypto, AES-256-GCM with a
+        PBKDF2 key from the user's master password); this side only stores the encrypted blob and
+        relays one approved login at a time to the agent browser."""
+        path = os.path.join(self.hub.store.dir, "vault.json")
+        if parts == ["provide"] and method == "POST":
+            b = self.body()
+            req = self.hub.cred_requests.get(b.get("id"))
+            if not req:
+                return self.ok({"stale": True})
+            if b.get("ok"):
+                site = str(b.get("site") or "").strip().lower()
+                req["answer"] = {"site": site, "username": str(b.get("username") or ""),
+                                 "password": str(b.get("password") or "")}
+            req["event"].set()
+            return self.ok()
+        if parts:
+            return self.fail(404, "Unknown vault action")
+        if method == "GET":
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return self.ok({"exists": True, "vault": json.load(f)})
+            except (OSError, ValueError):
+                return self.ok({"exists": False})
+        if method == "PUT":
+            v = self.body().get("vault")
+            ok = isinstance(v, dict) and all(isinstance(v.get(k), str) for k in ("salt", "iv", "data")) \
+                and isinstance(v.get("iterations"), int) and v["iterations"] >= 100000
+            if not ok:
+                return self.fail(400, "That isn't an encrypted vault.")
+            v = {"format": "vscode-assistant-vault-1", "cipher": "AES-256-GCM", "kdf": "PBKDF2-SHA256",
+                 "iterations": v["iterations"], "salt": v["salt"], "iv": v["iv"], "data": v["data"]}
+            fd, tmp = tempfile.mkstemp(dir=self.hub.store.dir, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(v, f)
+            os.replace(tmp, path)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            return self.ok()
+        if method == "DELETE":
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return self.ok()
         return self.fail(405, "Method not allowed")
 
     def api_agent(self, method, parts, query):

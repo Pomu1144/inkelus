@@ -58,7 +58,7 @@ input, select, textarea {
   background: var(--input); border: 1px solid var(--line-2); border-radius: var(--r-sm); padding: 6px 8px; outline: none; width: 100%;
 }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); }
-input[type=checkbox], input[type=range] { width: auto; padding: 0; accent-color: var(--accent); }
+input[type=checkbox], input[type=radio], input[type=range] { width: auto; padding: 0; accent-color: var(--accent); }
 input[type=range] { width: 100%; }
 label { display: block; color: var(--dim); font-size: 12px; margin: 8px 0 4px; }
 label > input, label > select, label > textarea { margin-top: 4px; color: var(--text); font-size: 14px; }

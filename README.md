@@ -168,6 +168,7 @@ How the model sees and uses a page:
 | `browser_back` | Goes back a page |
 | `browser_find` | Searches the page's text |
 | `browser_dialog` | Answers a confirm or prompt dialog |
+| `browser_login` | Fills a saved login from your Passwords vault, after you approve (browser version) |
 
 Safety:
 
@@ -175,9 +176,10 @@ Safety:
   clicking, typing…); just reading the page doesn't ask. Change this in
   **Settings › Agent browser** (browser version) to ask for every step, or
   never.
-- It **can't type into password fields**. To use sites that need a login,
-  click **Open the agent browser** in Settings (or turn Browser on and let it
-  open), log in yourself, and the private profile remembers it.
+- The model **can't type into password fields** itself. To sign in, it asks to
+  use a login from your **Passwords** vault (below); you can also click **Open
+  the agent browser** in Settings and log in yourself, and the private profile
+  remembers it.
 - Page content is fenced with markers that carry a fresh random code each
   time, so a page can't fake the end of its own content. The model is told
   never to follow instructions found inside, and to ask you before buying,
@@ -188,6 +190,36 @@ multi-step browsing much better than tiny ones. On some work computers,
 company policy blocks Chrome's remote control (`RemoteDebuggingAllowed`); the
 app tells you if that happens. Set the browser path in Settings, or the
 `VSCODE_ASSISTANT_CHROME` environment variable, if it can't find Chrome.
+
+## Passwords (browser version)
+
+**Passwords** in the left rail keeps the logins the agent browser may use on
+sites that need you to sign in.
+
+- **Encrypted on your computer.** You choose a master password the first time.
+  Your logins are encrypted with **AES-256-GCM**, with a key made from the
+  master password by **PBKDF2-SHA256 (600,000 rounds)**. Encryption and
+  decryption happen inside the app's page, using the browser's built-in Web
+  Crypto. Only the encrypted vault is saved, as `vault.json` in the data
+  folder; your master password is never stored anywhere.
+- **The AI never sees a password.** When a site needs a login, the AI uses
+  `browser_login` with the username and password fields' refs. You get a
+  **Use a saved login?** prompt showing the site and username (unlock the
+  vault there if it's locked), and only after you click **Fill login** is
+  that one login sent to the app, typed into the page and forgotten. The
+  model is only told that the login was filled; even the password's length
+  is hidden from it. "Allow all in this chat" doesn't skip this prompt.
+- **Only on the right site.** A login is filled only when the page's address
+  matches the site it was saved for (or one of its subdomains), and only on
+  https pages (plus localhost). That check runs again just before filling, so
+  a look-alike site or a page that redirected away doesn't get it.
+- **Locks itself** after 15 minutes without use, and when you close or reload
+  the window. There's a password generator, and you can change the master
+  password.
+- **No recovery.** If you forget the master password, the only option is to
+  delete the vault and start again.
+- The desktop window doesn't have the vault; there, log in yourself in the
+  agent browser window.
 
 ## Web sandbox
 
@@ -265,6 +297,7 @@ run_web.py / run_web.pyw        start the browser version
 vscode_assistant/app.py         the desktop window and its views
 vscode_assistant/server.py      the browser version: local web server + JSON API
 vscode_assistant/static/        the browser version's page, styles and scripts
+vscode_assistant/static/vault.js   the encrypted password vault (Web Crypto, in the page)
 vscode_assistant/engine.py      the chat + tool loop, shared by both versions
 vscode_assistant/providers.py   Ollama + OpenAI-compatible clients (streaming, tool calls)
 vscode_assistant/web.py         the sandbox browser (read-only web tools)

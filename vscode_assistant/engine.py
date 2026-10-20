@@ -53,6 +53,8 @@ def agent_for(store):
 
 def needs_confirm(store, c, name):
     """Whether this tool call needs the user's OK before it runs."""
+    if name in agent_browser.SELF_CONFIRMING:
+        return False   # browser_login asks for approval itself, every time, whatever the settings
     if c.get("allow_all_tools"):
         return False
     if name in agent_browser.TOOL_NAMES:

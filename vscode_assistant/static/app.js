@@ -120,9 +120,11 @@
       renderRail();
     } else if (ev.type === "confirm") {
       showConfirm(ev);
-    } else if (ev.type === "confirm_done") {
+    } else if (ev.type === "confirm_done" || ev.type === "credential_done") {
       const d = $("#dialog");
       if (d.dataset.confirm === ev.id) closeModal();
+    } else if (ev.type === "credential_request") {
+      showCredentialRequest(ev);
     } else if (ev.type === "toast") {
       toast(ev.text, ev.bad);
     } else if (ev.type === "pull" || ev.type === "pull_done") {
@@ -158,6 +160,7 @@
     if (name === "models") loadModelsView();
     if (name === "library") loadLibrary();
     if (name === "settings") fillSettings();
+    if (name === "passwords") renderVault();
   }
 
   // ── Chat ─────────────────────────────────────────────────────────────
@@ -456,6 +459,90 @@
       closeModal();
       await api("POST", "confirm", { id: ev.id, ok: a !== "deny", all: a === "all" });
     })));
+  }
+
+  // ── Saved logins ─────────────────────────────────────────────────────
+  // The AI asked to sign in. The user unlocks the vault (if needed), picks a login and approves; only then
+  // is that one login sent to the local server, which types it into the page and forgets it.
+  function showCredentialRequest(ev) {
+    const host = ev.host;
+    const fields = (ev.fields || []).join(" and ") || "login";
+    const answer = async (ok, it) => {
+      closeModal();
+      await api("POST", "vault/provide", ok && it ? { id: ev.id, ok: true, site: it.site, username: it.username,
+                                                      password: it.password } : { id: ev.id, ok: false });
+    };
+    const head = '<h3>Use a saved login?</h3><p class="dim small">The AI wants to sign in to <b>' + esc(host) +
+      "</b> in the agent browser window and needs your " + esc(fields) + ". It won't see the password; it's " +
+      "filled straight into the page, and only on " + esc(host) + ".</p>";
+    let d;
+    if (!Vault.exists) {
+      d = openModal(head + '<p class="small">You haven\'t saved any passwords yet. Add this site on the Passwords page, ' +
+        'or sign in yourself in the agent browser window.</p><div class="row end"><button class="btn" data-a="no">Decline</button></div>',
+      { confirm: ev.id });
+    } else if (!Vault.unlocked) {
+      d = openModal(head + '<label>Master password<input type="password" id="credPw" autocomplete="current-password"></label>' +
+        '<p class="small" id="credMsg"></p><div class="row between"><button class="btn" data-a="no">Decline</button>' +
+        '<button class="btn primary" data-a="unlock">Unlock</button></div>', { confirm: ev.id });
+      const go = guard(async () => {
+        try { await Vault.unlock($("#credPw").value); showCredentialRequest(ev); }
+        catch (e) { $("#credMsg").textContent = e.message; $("#credMsg").style.color = "var(--red)"; }
+      });
+      d.querySelector('[data-a="unlock"]').onclick = go;
+      $("#credPw").onkeydown = e => { if (e.key === "Enter") go(); };
+      setTimeout(() => $("#credPw") && $("#credPw").focus(), 50);
+    } else {
+      const matches = Vault.forHost(host);
+      if (matches.length) {
+        d = openModal(head + '<div class="opts">' + matches.map((it, i) =>
+          '<label class="check"><input type="radio" name="cred" value="' + i + '"' + (i ? "" : " checked") + "> " +
+          esc(it.username || "(no username)") + ' <span class="faint">· ' + esc(it.site) + "</span></label>").join("") +
+          '</div><div class="row between"><button class="btn" data-a="no">Decline</button>' +
+          '<button class="btn primary" data-a="fill">Fill login</button></div>', { confirm: ev.id });
+        d.querySelector('[data-a="fill"]').onclick = guard(() =>
+          answer(true, matches[+(d.querySelector("input[name=cred]:checked") || {}).value || 0]));
+      } else {
+        d = openModal(head + '<p class="small">There\'s no saved login for ' + esc(host) + '. Add one now:</p>' +
+          '<label>Username or email<input id="credUser" autocomplete="off"></label>' +
+          '<label>Password<input type="password" id="credNew" autocomplete="new-password"></label>' +
+          '<p class="small" id="credMsg"></p><div class="row between"><button class="btn" data-a="no">Decline</button>' +
+          '<button class="btn primary" data-a="add">Save and fill</button></div>', { confirm: ev.id });
+        d.querySelector('[data-a="add"]').onclick = guard(async () => {
+          try {
+            const it = await Vault.save({ site: host, username: $("#credUser").value, password: $("#credNew").value });
+            await answer(true, it);
+          } catch (e) { $("#credMsg").textContent = e.message; $("#credMsg").style.color = "var(--red)"; }
+        });
+      }
+    }
+    d.querySelector('[data-a="no"]').onclick = guard(() => answer(false));
+  }
+
+  function renderVault() {
+    const ex = Vault.exists, open = Vault.unlocked;
+    $("#vaultCreate").hidden = ex;
+    $("#vaultUnlock").hidden = !ex || open;
+    $("#vaultOpen").hidden = !open;
+    $("#vaultLock").hidden = !open;
+    $("#vaultState").textContent = !ex ? "No vault yet" : open ? "Unlocked" : "Locked";
+    if (!open) return;
+    const rows = Vault.list();
+    $("#vTable tbody").innerHTML = rows.length ? rows.map(it => "<tr><td>" + esc(it.site) + "</td><td>" +
+      esc(it.username) + '</td><td><span class="pw" data-id="' + esc(it.id) + '">••••••••</span></td><td class="acts">' +
+      '<button class="btn small" data-v="show" data-id="' + esc(it.id) + '">Show</button>' +
+      '<button class="btn small" data-v="copy" data-id="' + esc(it.id) + '">Copy</button>' +
+      '<button class="btn small" data-v="edit" data-id="' + esc(it.id) + '">Edit</button>' +
+      '<button class="btn small danger" data-v="del" data-id="' + esc(it.id) + '">Delete</button></td></tr>').join("")
+      : '<tr class="none"><td colspan="4">No saved logins yet. Add one above.</td></tr>';
+  }
+  function vaultForm(it) {
+    $("#vId").value = it ? it.id : "";
+    $("#vSite").value = it ? it.site : "";
+    $("#vUser").value = it ? it.username : "";
+    $("#vPw").value = it ? it.password : "";
+    $("#vPw").type = "password";
+    $("#vShow").textContent = "Show";
+    $("#vFormTitle").textContent = it ? "Edit login" : "Add a login";
   }
 
   async function libraryDialog() {
@@ -838,6 +925,63 @@
     $("#libDelete").onclick = guard(libDelete);
     $("#libImport").onchange = e => { const f = Array.from(e.target.files); e.target.value = ""; guard(libImport)(f); };
 
+    // passwords
+    Vault.onChange(() => { if (S.view === "passwords") renderVault(); });
+    const msg = (el, text, bad) => { $(el).textContent = text; $(el).style.color = bad ? "var(--red)" : "var(--green)"; };
+    $("#vCreate").onclick = guard(async () => {
+      if ($("#vNew1").value !== $("#vNew2").value) return msg("#vCreateMsg", "The two passwords don't match.", true);
+      try { await Vault.create($("#vNew1").value); $("#vNew1").value = $("#vNew2").value = ""; }
+      catch (e) { msg("#vCreateMsg", e.message, true); }
+    });
+    const unlock = guard(async () => {
+      msg("#vUnlockMsg", "Unlocking…");
+      try { await Vault.unlock($("#vPass").value); $("#vPass").value = ""; msg("#vUnlockMsg", ""); }
+      catch (e) { msg("#vUnlockMsg", e.message, true); }
+    });
+    $("#vUnlock").onclick = unlock;
+    $("#vPass").onkeydown = e => { if (e.key === "Enter") unlock(); };
+    $("#vReset").onclick = guard(async () => {
+      if (!confirm("Delete the whole password vault? Every saved login in it is lost. This can't be undone.")) return;
+      await Vault.destroy();
+      toast("Vault deleted");
+    });
+    $("#vaultLock").onclick = () => { Vault.lock(); toast("Passwords locked"); };
+    $("#vShow").onclick = () => { const p = $("#vPw"); p.type = p.type === "password" ? "text" : "password";
+      $("#vShow").textContent = p.type === "password" ? "Show" : "Hide"; };
+    $("#vGen").onclick = () => { $("#vPw").value = Vault.generate(20); $("#vPw").type = "text"; $("#vShow").textContent = "Hide"; };
+    $("#vClear").onclick = () => vaultForm(null);
+    $("#vSave").onclick = guard(async () => {
+      await Vault.save({ id: $("#vId").value, site: $("#vSite").value, username: $("#vUser").value, password: $("#vPw").value });
+      vaultForm(null);
+      toast("Login saved");
+    });
+    $("#vTable").onclick = guard(async e => {
+      const b = e.target.closest("[data-v]");
+      if (!b) return;
+      const it = Vault.list().find(x => x.id === b.dataset.id);
+      if (!it) return;
+      if (b.dataset.v === "show") {
+        const span = b.closest("tr").querySelector(".pw");
+        const showing = b.textContent === "Hide";
+        span.textContent = showing ? "••••••••" : it.password;
+        b.textContent = showing ? "Show" : "Hide";
+      } else if (b.dataset.v === "copy") {
+        await navigator.clipboard.writeText(it.password);
+        toast("Password copied");
+      } else if (b.dataset.v === "edit") {
+        vaultForm(it);
+        $("#vSite").focus();
+      } else if (b.dataset.v === "del" && confirm("Delete the login for " + it.site + "?")) {
+        await Vault.remove(it.id);
+      }
+    });
+    $("#vChange").onclick = guard(async () => {
+      if ($("#vChg1").value !== $("#vChg2").value) return msg("#vChangeMsg", "The two passwords don't match.", true);
+      try { await Vault.changePassword($("#vChg1").value); $("#vChg1").value = $("#vChg2").value = "";
+        msg("#vChangeMsg", "Master password changed."); }
+      catch (e) { msg("#vChangeMsg", e.message, true); }
+    });
+
     // settings
     $("#sModel").onchange = guard(async () => {
       const v = $("#sModel").value;
@@ -910,6 +1054,7 @@
       toast(e.message, true);
       return;
     }
+    await guard(() => Vault.init(api))();
     connectEvents();
     renderRail();
     let last = null;
