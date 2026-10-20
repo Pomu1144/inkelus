@@ -527,7 +527,10 @@ class Tab:
                 for k in kids:
                     walk(k, depth, True)
                 return
-            hidden = node.get("ignored") or role in TRANSPARENT and not (role in ("group", "generic") and name)
+            if role == "tooltip" and name.lower() in ("", "tooltip"):
+                return
+            hidden = (node.get("ignored") or role in TRANSPARENT and not (role in ("group", "generic") and name)
+                      or quiet_text and role in ("generic", "group"))  # inside a named link/button: adds nothing
             if hidden or role == "RootWebArea":
                 for k in kids:
                     walk(k, depth, quiet_text)
