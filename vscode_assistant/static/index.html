@@ -17,9 +17,11 @@
       <a data-view="chat" class="active"><svg viewBox="0 0 16 16"><path d="M2 3h12v8H7l-4 3v-3H2z"/></svg>Chat</a>
       <a data-view="models"><svg viewBox="0 0 16 16"><path d="M8 1.5l6 3.5v6l-6 3.5-6-3.5V5z M2 5l6 3.5L14 5 M8 8.5V14.5"/></svg>Models</a>
       <a data-view="library"><svg viewBox="0 0 16 16"><path d="M3 1.5h8v11H3z M5 4.5h4 M5 7h4 M13 4v10.5H5"/></svg>Library</a>
+      <a data-view="passwords"><svg viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>Passwords</a>
       <a data-view="settings"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15M3 3l1.8 1.8M11.2 11.2L13 13M3 13l1.8-1.8M11.2 4.8L13 3"/></svg>Settings</a>
     </nav>
-    <div class="chats-head"><span>Recents</span><input id="search" type="search" placeholder="Search" aria-label="Search chats"></div>
+    <div class="chats-head"><span>Recents</span><input id="search" type="search" placeholder="Search" aria-label="Search chats">
+      <button class="icon-btn" id="newGroup" title="New group">+</button></div>
     <div class="chat-list" id="chatList"></div>
     <div class="status"><i id="statusDot"></i><span id="statusText">Connecting…</span></div>
   </aside>
@@ -59,6 +61,7 @@
         <textarea id="prompt" rows="2" placeholder="Write to the model…   (Enter to send, Shift+Enter for a new line)"></textarea>
         <div class="bar">
           <label class="btn small attach" title="Attach images"><input type="file" id="attach" accept="image/*" multiple hidden><span class="plus-i">+</span><span class="lbl">Attach image</span></label>
+          <button class="btn small fast" type="button" id="fastBtn" title="Fast: skip the model's reasoning step for quicker answers">⚡ Fast</button>
           <span class="faint small" id="stats"></span>
           <button class="btn primary send" id="sendBtn" type="submit" title="Send (Enter)"><span class="lbl">Send</span><svg class="ico-send" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/></svg><svg class="ico-stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/></svg></button>
         </div>
@@ -120,6 +123,55 @@
       </div>
     </section>
 
+    <!-- Passwords -->
+    <section class="view" id="view-passwords" hidden>
+      <header class="head">
+        <h1>Passwords</h1>
+        <div class="tools"><span class="faint small" id="vaultState"></span><button class="btn" id="vaultLock" hidden>Lock</button></div>
+      </header>
+      <div class="scroll">
+        <div class="panel">
+          <p class="faint small">Saved logins the agent browser can use on sites that need you to sign in. They're stored only on this computer, encrypted with a master password you choose (AES-256, key made with 600,000 rounds of PBKDF2), and they're encrypted and decrypted here in this page. The app never stores your master password. The AI never sees a password: when it needs to log in, you're asked each time, and the login is only filled on the site it was saved for. There's no way to recover a forgotten master password.</p>
+        </div>
+        <div class="panel" id="vaultCreate" hidden>
+          <h3>Create your password vault</h3>
+          <label>Master password (at least 10 characters)<input type="password" id="vNew1" autocomplete="new-password"></label>
+          <label>Type it again<input type="password" id="vNew2" autocomplete="new-password"></label>
+          <div class="row"><button class="btn primary" id="vCreate">Create vault</button><span class="small" id="vCreateMsg"></span></div>
+        </div>
+        <div class="panel" id="vaultUnlock" hidden>
+          <h3>Unlock your passwords</h3>
+          <label>Master password<input type="password" id="vPass" autocomplete="current-password"></label>
+          <div class="row between"><button class="btn primary" id="vUnlock">Unlock</button><span class="small" id="vUnlockMsg"></span>
+            <button class="btn danger small" id="vReset">Forgot it? Delete the vault</button></div>
+        </div>
+        <div id="vaultOpen" hidden>
+          <div class="panel">
+            <h3 id="vFormTitle">Add a login</h3>
+            <input type="hidden" id="vId">
+            <div class="grid2">
+              <label>Website (e.g. github.com)<input id="vSite" autocomplete="off" spellcheck="false"></label>
+              <label>Username or email<input id="vUser" autocomplete="off" spellcheck="false"></label>
+              <label class="full">Password
+                <span class="row" style="margin:4px 0 0"><input type="password" id="vPw" autocomplete="new-password">
+                <button class="btn small" type="button" id="vShow">Show</button><button class="btn small" type="button" id="vGen">Generate</button></span></label>
+            </div>
+            <div class="row end"><button class="btn" id="vClear">Clear</button><button class="btn primary" id="vSave">Save login</button></div>
+          </div>
+          <table class="table" id="vTable"><thead><tr><th>Website</th><th>Username</th><th>Password</th><th></th></tr></thead><tbody></tbody></table>
+          <div class="panel">
+            <h3>Change master password</h3>
+            <div class="grid2">
+              <label>New master password<input type="password" id="vChg1" autocomplete="new-password"></label>
+              <label>Type it again<input type="password" id="vChg2" autocomplete="new-password"></label>
+            </div>
+            <div class="row"><button class="btn" id="vChange">Change</button><span class="small" id="vChangeMsg"></span></div>
+          </div>
+          <p class="faint small">Locks itself after 15 minutes without use, and whenever you close or reload this window.</p>
+        </div>
+      </div>
+    </section>
+
     <!-- Settings -->
     <section class="view" id="view-settings" hidden>
       <header class="head"><h1>Settings</h1></header>
@@ -137,7 +189,7 @@
             <button class="tab" data-theme="light">Light</button>
             <button class="tab" data-theme="system">Match system</button>
           </div>
-          <p class="faint small">Warm dark: charcoal greys, a clay accent, rounded shapes and serif replies. Blue dark and Light match the desktop window's Professional style.</p>
+          <p class="faint small">Warm dark: charcoal greys, a clay accent, rounded shapes and serif replies. Blue dark is a cooler editor-style look; Light is for bright rooms.</p>
         </div>
         <div class="panel">
           <h3>Web sandbox</h3>
@@ -195,6 +247,7 @@
 <div class="modal" id="modal" hidden><div class="dialog" id="dialog"></div></div>
 <div class="toast" id="toast" hidden></div>
 <script src="/static/markdown.js"></script>
+<script src="/static/vault.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

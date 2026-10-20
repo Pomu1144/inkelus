@@ -1,9 +1,9 @@
-"""The chat turn, shared by the desktop window and the browser version.
+"""The chat turn: model, tools, results, repeat.
 
 run_turn() talks to the model, runs any web-sandbox tool calls it asks for,
 feeds the results back, and repeats until the model answers in plain text.
 It runs on a worker thread and reports through callbacks, so it knows
-nothing about Tk or HTTP.
+nothing about HTTP or the page.
 """
 import json
 
@@ -53,6 +53,8 @@ def agent_for(store):
 
 def needs_confirm(store, c, name):
     """Whether this tool call needs the user's OK before it runs."""
+    if name in agent_browser.SELF_CONFIRMING:
+        return False   # browser_login asks for approval itself, every time, whatever the settings
     if c.get("allow_all_tools"):
         return False
     if name in agent_browser.TOOL_NAMES:

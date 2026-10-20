@@ -1,19 +1,15 @@
 # VSCode Assistant
 
-A desktop chat app for your local LLMs, written in pure Python. It uses only
-tkinter and the standard library: no pip installs, no Node, and no admin
-rights needed. It includes its own **sandbox browser**, so a model can search
-the web and read pages without touching any browser on your computer.
+A local AI **command center** for the models on your own computer, written in
+pure Python with only the standard library: no pip installs, no Node, and no
+admin rights needed. It runs as a small server on your computer and opens in
+its own browser window, and from there it opens whatever else it needs, such
+as the **agent browser** window the AI can drive.
 
-It has three interface styles, which you switch between in **Settings ›
-Interface style**:
-
-- **Professional** (the default): neutral dark editor greys, a blue accent,
-  clean sans type and flat controls.
-- **Ink**: charcoal ink, cream paper and gold, with serif type, thin square
-  frames and ink artwork (from NXBNVNB).
-- **Glass**: dark slate tiles, condensed type and a yellow accent (from
-  NXBNVNB).
+It brings together chat with your local models (Ollama, LM Studio,
+llama.cpp…), a read-only **web sandbox**, an **agent browser**, a **Library**
+of documents and templates, an encrypted **Passwords** vault, and chat
+**groups**.
 
 ## Run it
 
@@ -21,47 +17,30 @@ Interface style**:
 python run.py
 ```
 
-On Windows you can also double-click **`run.pyw`**, which opens without a
-console window. `python -m vscode_assistant` works too.
+On Windows you can double-click **`run.pyw`**, which starts without a console
+window. `python -m vscode_assistant` works too.
 
-You need **Python 3.8+ with Tk**. The python.org installers for Windows and
-macOS include Tk. On Linux, install your distro's `python3-tk` package if
-`import tkinter` fails.
-
-Then start [Ollama](https://ollama.com) and pull a model from the
-**Models** screen, for example `qwen2.5:1.5b`.
-
-### In your browser (faster)
-
-```bash
-python run_web.py
-```
-
-On Windows you can double-click **`run_web.pyw`** instead. This starts a small
-server on your own computer (`http://127.0.0.1:8765`, never reachable from
-other machines) and opens the app in Chrome as its own window, or in Edge or
-your default browser if Chrome isn't installed. `python -m vscode_assistant
---web` works too. Options:
+It starts a small server on your own computer (`http://127.0.0.1:8765`, never
+reachable from other machines) and opens the app in Chrome as its own window,
+or in Edge or your default browser if Chrome isn't installed. Options:
 
 - `--tab`: open as a normal browser tab instead of an app window
 - `--no-open`: just start the server; open the printed address yourself
 - `--port 9000`: use a different port
 - `--keep-running`: don't stop when the last app window closes
 
-The browser version has everything the desktop window has: streaming chat,
-Markdown with copyable code blocks, the web sandbox, the Library, models and
-settings. Its default **Warm dark** theme gives it a calm chat look: charcoal
-greys, a clay accent, rounded shapes, serif replies in one centred column, and
-a greeting on the start page. **Blue dark** (the desktop window's look),
-**Light** and **Match system** are in **Settings › Appearance**. You can also
-paste or drag images into the message box. It uses the same data folder, so your chats, settings and
-Library are shared. Don't run both at the same time, or the one you close
-last overwrites the other's changes.
+You need **Python 3.8+**. Then start [Ollama](https://ollama.com) and pull a
+model from the **Models** screen, for example `qwen2.5:7b`.
 
 The server stops by itself about 30 seconds after you close the last app
 window (unless a reply or a model download is still running). Launching it
 again while it's running just reopens the window. You can also press `Ctrl+C`
 in its console.
+
+**Appearance:** the default **Warm dark** theme has charcoal greys, a clay
+accent, rounded shapes, serif replies in one centred column, and a greeting
+on the start page. **Blue dark**, **Light** and **Match system** are in
+**Settings › Appearance**. You can paste or drag images into the message box.
 
 ## Features
 
@@ -90,6 +69,25 @@ in its console.
 - **Multiple servers**: Ollama, plus OpenAI-compatible servers (LM Studio,
   llama.cpp `llama-server`, vLLM, LocalAI, Jan…). Models from every server
   appear in one picker under **Settings › Model**.
+
+## Chat groups, Fast mode and the thinking indicator
+
+- **Groups.** Click **+** next to *Recents* to make a group and type its name
+  (a project, a class, "Work"…). Drag chats onto a group to move them;
+  chats not in a group are under **General**. Click a group's name to
+  collapse it; hover it to start a new chat in it (**+**), rename it (**✎**,
+  or double-click the name) or delete it (**✕**; its chats move back to
+  General).
+- **Fast mode.** The **⚡ Fast** button by the message box tells reasoning
+  models (qwen3, deepseek-r1…) to skip their thinking step and answer straight
+  away. It's remembered per chat and used for new chats until you switch it
+  off. Ollama gets `think: false`; OpenAI-compatible servers get
+  `enable_thinking: false` (llama.cpp, vLLM). If a server doesn't support it,
+  the request is simply sent again without it.
+- **Thinking indicator.** Until the first words of a reply arrive, it shows
+  an animated *Working*, *Thinking* (while a reasoning model reasons) or
+  *Answering* (in Fast mode) with a seconds counter. Running tool steps show
+  a small spinner.
 
 ## Library
 
@@ -168,16 +166,18 @@ How the model sees and uses a page:
 | `browser_back` | Goes back a page |
 | `browser_find` | Searches the page's text |
 | `browser_dialog` | Answers a confirm or prompt dialog |
+| `browser_login` | Fills a saved login from your Passwords vault, after you approve |
 
 Safety:
 
 - By default you **approve every action that changes something** (opening,
   clicking, typing…); just reading the page doesn't ask. Change this in
-  **Settings › Agent browser** (browser version) to ask for every step, or
+  **Settings › Agent browser** to ask for every step, or
   never.
-- It **can't type into password fields**. To use sites that need a login,
-  click **Open the agent browser** in Settings (or turn Browser on and let it
-  open), log in yourself, and the private profile remembers it.
+- The model **can't type into password fields** itself. To sign in, it asks to
+  use a login from your **Passwords** vault (below); you can also click **Open
+  the agent browser** in Settings and log in yourself, and the private profile
+  remembers it.
 - Page content is fenced with markers that carry a fresh random code each
   time, so a page can't fake the end of its own content. The model is told
   never to follow instructions found inside, and to ask you before buying,
@@ -188,6 +188,34 @@ multi-step browsing much better than tiny ones. On some work computers,
 company policy blocks Chrome's remote control (`RemoteDebuggingAllowed`); the
 app tells you if that happens. Set the browser path in Settings, or the
 `VSCODE_ASSISTANT_CHROME` environment variable, if it can't find Chrome.
+
+## Passwords
+
+**Passwords** in the left rail keeps the logins the agent browser may use on
+sites that need you to sign in.
+
+- **Encrypted on your computer.** You choose a master password the first time.
+  Your logins are encrypted with **AES-256-GCM**, with a key made from the
+  master password by **PBKDF2-SHA256 (600,000 rounds)**. Encryption and
+  decryption happen inside the app's page, using the browser's built-in Web
+  Crypto. Only the encrypted vault is saved, as `vault.json` in the data
+  folder; your master password is never stored anywhere.
+- **The AI never sees a password.** When a site needs a login, the AI uses
+  `browser_login` with the username and password fields' refs. You get a
+  **Use a saved login?** prompt showing the site and username (unlock the
+  vault there if it's locked), and only after you click **Fill login** is
+  that one login sent to the app, typed into the page and forgotten. The
+  model is only told that the login was filled; even the password's length
+  is hidden from it. "Allow all in this chat" doesn't skip this prompt.
+- **Only on the right site.** A login is filled only when the page's address
+  matches the site it was saved for (or one of its subdomains), and only on
+  https pages (plus localhost). That check runs again just before filling, so
+  a look-alike site or a page that redirected away doesn't get it.
+- **Locks itself** after 15 minutes without use, and when you close or reload
+  the window. There's a password generator, and you can change the master
+  password.
+- **No recovery.** If you forget the master password, the only option is to
+  delete the vault and start again.
 
 ## Web sandbox
 
@@ -237,10 +265,8 @@ tool calls.
 
 ## Work laptops
 
-- **Nothing to install** beyond Python. The bundled fonts (Inter, Kaisei
-  Tokumin, Cinzel, Oswald) are loaded for this app's process only, not
-  installed system-wide. If that's blocked, the app falls back to Georgia or
-  Segoe UI.
+- **Nothing to install** beyond Python and a browser (Chrome or Edge is best).
+  The Inter font is served by the app itself, never installed system-wide.
 - **Corporate proxies**:
   - Requests to your model servers on `localhost` skip any `HTTP(S)_PROXY`
     setting.
@@ -254,26 +280,22 @@ tool calls.
 ## Keyboard
 
 - `Enter` sends, `Shift+Enter` adds a new line
-- `Esc` stops generation
-- `Ctrl+N` starts a new chat
+- `Esc` stops generation (or closes a dialog)
+- `Ctrl+S` saves in the Library editor
 
 ## Files
 
 ```
-run.py / run.pyw                 start the app
-run_web.py / run_web.pyw        start the browser version
-vscode_assistant/app.py         the desktop window and its views
-vscode_assistant/server.py      the browser version: local web server + JSON API
-vscode_assistant/static/        the browser version's page, styles and scripts
-vscode_assistant/engine.py      the chat + tool loop, shared by both versions
-vscode_assistant/providers.py   Ollama + OpenAI-compatible clients (streaming, tool calls)
-vscode_assistant/web.py         the sandbox browser (read-only web tools)
+run.py / run.pyw                   start the command center (run_web.py / .pyw do the same)
+vscode_assistant/server.py         local web server + JSON API; opens the app window
+vscode_assistant/static/           the app's page, styles and scripts
+vscode_assistant/static/vault.js   the encrypted password vault (Web Crypto, in the page)
+vscode_assistant/engine.py         the chat + tool loop
+vscode_assistant/providers.py      Ollama + OpenAI-compatible clients (streaming, tool calls)
+vscode_assistant/web.py            the sandbox browser (read-only web tools)
 vscode_assistant/agent_browser.py  the agent browser: drives a Chrome window over DevTools
-vscode_assistant/mdtk.py        Markdown → Tk text renderer
-vscode_assistant/widgets.py     styled widgets: main button, nav rail rows, panels
-vscode_assistant/theme.py       Professional, Ink and Glass palettes, font loading
-vscode_assistant/net.py         urllib helpers
-vscode_assistant/store.py       settings + chats on disk
-vscode_assistant/library.py     documents + templates, and the prompt text they add
-vscode_assistant/assets/        app icon, fonts, and ink art from NXBNVNB
+vscode_assistant/library.py        documents + templates, and the prompt text they add
+vscode_assistant/net.py            urllib helpers
+vscode_assistant/store.py          settings + chats on disk
+vscode_assistant/assets/           app icons, logos and the Inter font
 ```
