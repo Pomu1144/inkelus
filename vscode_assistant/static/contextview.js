@@ -6,9 +6,12 @@ window.VAContext = function (app) {
   const { api, toast, guard, openModal, closeModal, $, $$ } = app;
   const esc = v => app.esc(v == null ? "" : String(v));
   const C = { graph: null, sources: [], syncing: false, filter: "", loose: false, sel: "", loaded: false };
-  const KINDS = [["jira", "Jira"], ["pr", "Pull requests"], ["mail", "Email"]];
-  const COL = { jira: 0, pr: 1, mail: 2 };
+  const KINDS = [["jira", "Jira"], ["pr", "Pull requests"], ["mail", "Email"], ["note", "Notes"]];
+  const LABEL = { jira: "Jira issue", pr: "Pull request", mail: "Email", note: "Note" };
+  const SHORT = { jira: "Jira", pr: "PR", mail: "Email", note: "Note" };
+  let COL = { jira: 0, pr: 1, mail: 2 };
   let adj = {};
+  const isManual = (a, b) => C.manual.has(a < b ? a + "|" + b : b + "|" + a);
 
   async function load() {
     const r = await api("GET", "context");
@@ -20,6 +23,7 @@ window.VAContext = function (app) {
     C.byId = {};
     C.graph.nodes.forEach(n => { C.byId[n.id] = n; adj[n.id] = new Set(); });
     C.graph.edges.forEach(([a, b]) => { if (adj[a] && adj[b]) { adj[a].add(b); adj[b].add(a); } });
+    C.manual = new Set((C.graph.manual || []).map(([a, b]) => (a < b ? a + "|" + b : b + "|" + a)));
     if (C.sel && !C.byId[C.sel]) C.sel = "";
   }
 
@@ -46,16 +50,16 @@ window.VAContext = function (app) {
     return words.every(w => h.includes(w));
   }
   function card(n, hit) {
-    const label = n.kind === "pr" ? n.id.replace(/^[^/]+\//, "") : n.kind === "mail" ? "" : n.id;
+    const label = n.kind === "pr" ? n.id.replace(/^[^/]+\//, "") : n.kind === "jira" ? n.id : n.kind === "note" ? (n.who || "note") : "";
     return '<div class="ccard k-' + esc(n.kind) + (C.sel === n.id ? " sel" : "") + (hit ? "" : " miss") + '" data-id="' + esc(n.id) + '" tabindex="0">' +
       '<div class="cc-top">' + (label ? '<span class="cc-id">' + esc(label) + "</span>" : '<span class="cc-id">' + esc(n.who || "") + "</span>") +
       (n.state ? '<span class="cc-state st-' + esc(n.state.replace(/\W+/g, "-")) + '">' + esc(n.state) + "</span>" : "") +
       '<span class="cc-when">' + esc(when(n.updated)) + "</span></div>" +
       '<div class="cc-title">' + esc(n.title) + "</div>" +
-      (n.kind !== "mail" && n.who ? '<div class="cc-who">' + esc(n.kind === "jira" ? "Assignee: " + n.who : n.who) + "</div>" : "") + "</div>";
+      (n.kind !== "mail" && n.kind !== "note" && n.who ? '<div class="cc-who">' + esc(n.kind === "jira" ? "Assignee: " + n.who : n.who) + "</div>" : "") + "</div>";
   }
   function band(ids, title) {
-    const cols = [[], [], []];
+    const cols = C.kinds.map(() => []);
     ids.forEach(i => { const n = C.byId[i]; if (n) cols[COL[n.kind]].push(n); });
     return '<section class="cband"><div class="cb-title">' + esc(title) + '</div><div class="cb-grid">' +
       cols.map((list, k) => '<div class="cb-col" data-col="' + k + '">' + list.map(n => card(n, matches(n))).join("") + "</div>").join("") +
@@ -65,16 +69,23 @@ window.VAContext = function (app) {
     const j = ids.map(i => C.byId[i]).find(n => n && n.kind === "jira");
     const p = ids.map(i => C.byId[i]).find(n => n && n.kind === "pr");
     const lead = j || p || C.byId[ids[0]];
-    return lead ? (lead.kind === "mail" ? lead.title : lead.id + " · " + lead.title) : "";
+    return lead ? (lead.kind === "mail" || lead.kind === "note" ? lead.title : lead.id + " · " + lead.title) : "";
   }
   function render() {
     const g = C.graph;
-    const counts = { jira: 0, pr: 0, mail: 0 };
+    const counts = { jira: 0, pr: 0, mail: 0, note: 0 };
     g.nodes.forEach(n => counts[n.kind]++);
+    // a Notes column only once there are notes
+    C.kinds = KINDS.filter(([k]) => k !== "note" || counts.note);
+    COL = {};
+    C.kinds.forEach(([k], i) => (COL[k] = i));
+    $("#ctxBoard").style.setProperty("--ctx-cols", C.kinds.length);
+    $("#ctxBoard").classList.toggle("cols4", C.kinds.length > 3);
+    const notes = counts.note ? ", " + counts.note + " note" + (counts.note === 1 ? "" : "s") : "";
     const st = $("#ctxStatus");
     if (C.syncing) st.innerHTML = '<span class="spinner"></span> Syncing ' + esc(C.sources.join(", ")) + "…";
-    else if (!g.synced) st.textContent = C.sources.length ? "Not synced yet." : "";
-    else st.innerHTML = "Synced " + esc(when(g.synced)) + " · " + counts.pr + " pull requests, " + counts.jira + " Jira issues, " + counts.mail + " emails · " +
+    else if (!g.synced) st.textContent = (C.sources.length ? "Not synced yet." : "Nothing synced (no sources set up).") + (notes ? " " + notes.slice(2) + "." : "");
+    else st.innerHTML = "Synced " + esc(when(g.synced)) + " · " + counts.pr + " pull requests, " + counts.jira + " Jira issues, " + counts.mail + " emails" + esc(notes) + " · " +
       g.threads.length + " thread" + (g.threads.length === 1 ? "" : "s") +
       (g.errors.length ? ' · <button class="linkish bad" id="ctxErrs">' + g.errors.length + " problem" + (g.errors.length === 1 ? "" : "s") + "</button>" : "");
     $("#ctxSync").disabled = C.syncing;
@@ -84,7 +95,8 @@ window.VAContext = function (app) {
       board.innerHTML = '<div class="ctx-empty"><h3>Connect your work</h3><p class="faint">Add GitHub repositories, your Jira site and an email account in <b>Settings › Work context</b>. ' +
         "A sync reads your recent pull requests, issues and email, and links the ones that mention each other: a Jira key like ABC-123 in a PR, a PR link in an email.</p>" +
         '<p class="faint small">Everything is read-only and stays on this computer. The model only reads the saved copy, in chats where you turn on <b>Context</b>.</p>' +
-        '<button class="btn primary" data-a="settings">Open settings</button></div>';
+        '<div class="row" style="justify-content:center"><button class="btn primary" data-a="settings">Open settings</button><button class="btn" data-a="addnote">' + icon("plus") + "Add a note</button></div>" +
+        '<p class="faint small">Or add context by hand: notes from a meeting, a Slack thread, a decision, a document link. Notes that mention ABC-123 or a PR link to them automatically, and you can link any two items yourself.</p></div>';
       renderDetail();
       return;
     }
@@ -94,12 +106,14 @@ window.VAContext = function (app) {
       return;
     }
     const threads = g.threads.filter(t => t.some(i => matches(C.byId[i])));
-    const loose = C.loose ? g.loose.filter(i => matches(C.byId[i])) : [];
-    board.innerHTML = '<div class="cb-head"><span>Jira</span><span>Pull requests</span><span>Email</span></div>' +
+    // your own notes always show; other unlinked items only with Unlinked ticked
+    const loose = g.loose.filter(i => (C.loose || C.byId[i].kind === "note") && matches(C.byId[i]));
+    const hidden = g.loose.filter(i => C.byId[i].kind !== "note").length;
+    board.innerHTML = '<div class="cb-head">' + C.kinds.map(([, l]) => "<span>" + l + "</span>").join("") + "</div>" +
       threads.map(t => band(t, threadTitle(t))).join("") +
-      (loose.length ? band(loose, "Not linked to anything") : "") +
-      (!threads.length && !loose.length ? '<p class="faint small pad">' + (C.filter ? "Nothing matches." : g.loose.length ? "No linked items. Tick <b>Unlinked</b> to see the " + g.loose.length + " items that don't mention each other." : "") + "</p>" : "") +
-      (!C.loose && g.loose.length && threads.length ? '<p class="faint tiny pad">' + g.loose.length + " item" + (g.loose.length === 1 ? " isn't" : "s aren't") + " linked to anything; tick <b>Unlinked</b> to show them.</p>" : "");
+      (loose.length ? band(loose, C.loose ? "Not linked to anything" : "Your notes that aren't linked yet") : "") +
+      (!threads.length && !loose.length ? '<p class="faint small pad">' + (C.filter ? "Nothing matches." : hidden ? "No linked items. Tick <b>Unlinked</b> to see the " + hidden + " items that don't mention each other." : "") + "</p>" : "") +
+      (!C.loose && hidden && (threads.length || loose.length) ? '<p class="faint tiny pad">' + hidden + " item" + (hidden === 1 ? " isn't" : "s aren't") + " linked to anything; tick <b>Unlinked</b> to show them.</p>" : "");
     requestAnimationFrame(drawLinks);
     renderDetail();
   }
@@ -132,13 +146,14 @@ window.VAContext = function (app) {
         } else if (gap === 1) {
           const mx = (p.r + q.l) / 2;
           d = "M" + p.r + " " + p.y + " C" + mx + " " + p.y + " " + mx + " " + q.y + " " + q.l + " " + q.y;
-        } else {                   // Jira ↔ email: around the PR column, along the top of the band
+        } else {                   // across a column (Jira ↔ email): around it, along the top of the band
           dashed = true;
           const top = 28, r = 6, x1 = p.r + 10, x2 = q.l - 10;
           d = "M" + p.r + " " + p.y + " H" + (x1 - r) + " Q" + x1 + " " + p.y + " " + x1 + " " + (p.y - r) + " V" + (top + r) + " Q" + x1 + " " + top + " " + (x1 + r) + " " + top +
             " H" + (x2 - r) + " Q" + x2 + " " + top + " " + x2 + " " + (top + r) + " V" + (q.y - r) + " Q" + x2 + " " + q.y + " " + (x2 + r) + " " + q.y + " H" + q.l;
         }
-        paths += '<path d="' + d + '" data-a="' + esc(x.id) + '" data-b="' + esc(y.id) + '"' + (dashed ? ' class="dash"' : "") + "/>";
+        const cls = (dashed ? "dash " : "") + (isManual(x.id, y.id) ? "hand" : "");
+        paths += '<path d="' + d + '" data-a="' + esc(x.id) + '" data-b="' + esc(y.id) + '"' + (cls ? ' class="' + cls.trim() + '"' : "") + "/>";
       }));
       svg.innerHTML = paths;
     });
@@ -161,21 +176,25 @@ window.VAContext = function (app) {
     box.hidden = !n;
     $("#view-context").classList.toggle("has-detail", !!n);
     if (!n) return;
-    const kind = { jira: "Jira issue", pr: "Pull request", mail: "Email" }[n.kind];
+    const kind = LABEL[n.kind];
     const fields = Object.entries(n.fields || {}).filter(([, v]) => v);
     const linked = Array.from(adj[n.id] || []).map(i => C.byId[i]).filter(Boolean);
     box.innerHTML = '<div class="cd-head"><span class="tag k-' + esc(n.kind) + '">' + kind + '</span><button class="icon-btn" data-a="close" title="Close">' + icon("close") + "</button></div>" +
-      "<h3>" + esc(n.title) + '</h3><p class="faint small mono">' + esc(n.kind === "mail" ? (n.fields || {}).from || n.who : n.id) + "</p>" +
+      "<h3>" + esc(n.title) + '</h3><p class="faint small mono">' + esc(n.kind === "mail" ? (n.fields || {}).from || n.who : n.kind === "note" ? "Added by you" + (n.who && n.who !== "note" ? " · " + n.who : "") : n.id) + "</p>" +
       '<table class="cd-fields">' + (n.state ? "<tr><td>Status</td><td>" + esc(n.state) + "</td></tr>" : "") +
-      (n.who ? "<tr><td>" + (n.kind === "jira" ? "Assignee" : n.kind === "pr" ? "Author" : "From") + "</td><td>" + esc(n.who) + "</td></tr>" : "") +
+      (n.who && n.kind !== "note" ? "<tr><td>" + (n.kind === "jira" ? "Assignee" : n.kind === "pr" ? "Author" : "From") + "</td><td>" + esc(n.who) + "</td></tr>" : "") +
       (n.updated ? "<tr><td>Updated</td><td>" + esc(new Date(n.updated).toLocaleString()) + "</td></tr>" : "") +
       fields.map(([k, v]) => "<tr><td>" + esc(k.charAt(0).toUpperCase() + k.slice(1)) + "</td><td>" + esc(k === "created" && v ? new Date(v).toLocaleString() : v) + "</td></tr>").join("") + "</table>" +
       '<div class="row tight">' + (n.url ? '<a class="btn small" href="' + esc(n.url) + '" target="_blank" rel="noopener noreferrer">' + icon("external") + "Open</a>" : "") +
-      '<button class="btn small primary" data-a="ask">' + icon("spark") + "Ask about this</button></div>" +
+      '<button class="btn small primary" data-a="ask">' + icon("spark") + "Ask about this</button>" +
+      '<button class="btn small" data-a="linkto" title="Link this to another item by hand">' + icon("link") + "Link to…</button>" +
+      (n.kind === "note" ? '<button class="btn small" data-a="edit">' + icon("edit") + 'Edit</button><button class="icon-btn" data-a="delete" title="Delete this note">' + icon("trash") + "</button>"
+        : '<button class="btn small" data-a="addnote" title="Add a note linked to this item">' + icon("plus") + "Note</button>") + "</div>" +
       '<div class="cd-text">' + esc(n.text || "(no description)") + "</div>" +
-      (linked.length ? '<h4>Linked (' + linked.length + ")</h4>" + linked.map(m => '<button class="cd-link" data-id="' + esc(m.id) + '"><span class="tag k-' + esc(m.kind) + '">' +
-        esc({ jira: "Jira", pr: "PR", mail: "Email" }[m.kind]) + "</span><span>" + esc(m.kind === "mail" ? m.title : m.id + " · " + m.title) + "</span></button>").join("")
-        : '<p class="faint small">Not linked to anything else.</p>');
+      (linked.length ? '<h4>Linked (' + linked.length + ")</h4>" + linked.map(m => '<div class="cd-linkrow"><button class="cd-link" data-id="' + esc(m.id) + '"><span class="tag k-' + esc(m.kind) + '">' +
+        esc(SHORT[m.kind]) + "</span><span>" + esc(m.kind === "mail" || m.kind === "note" ? m.title : m.id + " · " + m.title) + "</span></button>" +
+        (isManual(n.id, m.id) ? '<button class="icon-btn" data-unlink="' + esc(m.id) + '" title="Remove this link (you added it)">' + icon("close") + "</button>" : "") + "</div>").join("")
+        : '<p class="faint small">Not linked to anything else. Use <b>Link to…</b> to connect it by hand.</p>');
   }
   function select(id) {
     C.sel = C.sel === id ? "" : id;
@@ -193,10 +212,73 @@ window.VAContext = function (app) {
     app.renderChat();
     app.renderRail();
     app.showView("chat");
-    const what = n.kind === "mail" ? 'the email "' + n.title + '" from ' + n.who : n.id + ' ("' + n.title + '")';
+    const what = n.kind === "mail" ? 'the email "' + n.title + '" from ' + n.who : n.kind === "note" ? 'my note "' + n.title + '" (' + n.id + ")" : n.id + ' ("' + n.title + '")';
     $("#prompt").value = "What's the status of " + what + "? Summarize it together with everything linked to it, and tell me what still needs doing.";
     app.autosize();
     $("#prompt").focus();
+  }
+
+  // ── context you add by hand ───────────────────────────────────────────
+  async function change(body) {
+    const r = await api("POST", "context", body);
+    await load();
+    return r;
+  }
+  function pickerHTML(exclude, chosen) {
+    const items = C.graph.nodes.filter(n => !exclude.has(n.id)).sort((a, b) => (b.updated || "").localeCompare(a.updated || ""));
+    return '<input type="search" class="cpick-filter" placeholder="Find an item (ABC-123, a title, a name…)" spellcheck="false"><div class="cpick">' +
+      (items.length ? items.map(n => '<label class="check cpick-row" data-hay="' + esc(hay(n)) + '"><input type="checkbox" value="' + esc(n.id) + '"' + (chosen.has(n.id) ? " checked" : "") + '><span class="tag k-' + esc(n.kind) + '">' +
+        esc(SHORT[n.kind]) + "</span><span>" + esc(n.kind === "mail" || n.kind === "note" ? n.title : n.id + " · " + n.title) + "</span></label>").join("")
+        : '<p class="faint small">Nothing to link to yet.</p>') + "</div>";
+  }
+  function wirePicker(d) {
+    const f = d.querySelector(".cpick-filter");
+    f.oninput = () => {
+      const words = f.value.toLowerCase().split(/\s+/).filter(Boolean);
+      d.querySelectorAll(".cpick-row").forEach(r => (r.hidden = !words.every(w => r.dataset.hay.includes(w))));
+    };
+    return () => Array.from(d.querySelectorAll(".cpick input:checked")).map(i => i.value);
+  }
+  function noteDialog(note, linkTo) {
+    const own = note ? new Set([note.id]) : new Set();
+    const chosen = new Set(note ? Array.from(adj[note.id] || []).filter(j => isManual(note.id, j)) : linkTo ? [linkTo] : []);
+    const d = openModal("<h3>" + (note ? "Edit note" : "Add context") + '</h3><p class="faint small">Anything the model should know: meeting notes, a Slack thread, a decision, a document. ' +
+      "Mentions of ABC-123 or a PR link automatically; tick items below to link it by hand.</p>" +
+      '<label>Title<input id="cnTitle" value="' + esc(note ? note.title : "") + '" placeholder="Standup: webhook retries"></label>' +
+      '<div class="grid2"><label>Source (optional)<input id="cnSource" value="' + esc(note && note.who !== "note" ? note.who : "") + '" placeholder="Meeting, Slack, Confluence…"></label>' +
+      '<label>Link (optional)<input id="cnUrl" value="' + esc(note ? note.url : "") + '" placeholder="https://…" spellcheck="false"></label></div>' +
+      '<label>Text<textarea id="cnText" rows="8" placeholder="What was said or decided…">' + esc(note ? (note.text || "") : "") + "</textarea></label>" +
+      "<label>Link to</label>" + pickerHTML(own, chosen) +
+      '<p class="small" id="cnMsg"></p><div class="row end"><button class="btn" data-a="cancel">Cancel</button><button class="btn primary" data-a="ok">' + (note ? "Save" : "Add") + "</button></div>");
+    d.classList.add("wide");
+    const picked = wirePicker(d);
+    d.querySelector('[data-a="cancel"]').onclick = closeModal;
+    d.querySelector('[data-a="ok"]').onclick = guard(async () => {
+      const links = picked();
+      try {
+        const r = await change({ action: "note", id: note ? note.id : "", title: $("#cnTitle").value, source: $("#cnSource").value, url: $("#cnUrl").value, text: $("#cnText").value, links });
+        if (note) for (const j of Array.from(chosen).filter(x => !links.includes(x))) await change({ action: "unlink", a: note.id, b: j });
+        closeModal();
+        C.sel = r.note.id;
+        render();
+        toast(note ? "Note saved." : "Note added.");
+      } catch (e) { $("#cnMsg").textContent = e.message; $("#cnMsg").style.color = "var(--red)"; }
+    });
+    $("#cnTitle").focus();
+  }
+  function linkDialog(id) {
+    const n = C.byId[id];
+    const d = openModal("<h3>Link " + esc(n.kind === "jira" || n.kind === "pr" ? n.id : "\u201c" + n.title + "\u201d") + ' to…</h3><p class="faint small">For items that belong together but don\'t mention each other. The link is kept across syncs, and the model sees it.</p>' +
+      pickerHTML(new Set([id].concat(Array.from(adj[id] || []))), new Set()) + '<div class="row end"><button class="btn" data-a="cancel">Cancel</button><button class="btn primary" data-a="ok">Link</button></div>');
+    d.classList.add("wide");
+    const picked = wirePicker(d);
+    d.querySelector('[data-a="cancel"]').onclick = closeModal;
+    d.querySelector('[data-a="ok"]').onclick = guard(async () => {
+      for (const other of picked()) await change({ action: "link", a: id, b: other });
+      closeModal();
+      render();
+    });
+    d.querySelector(".cpick-filter").focus();
   }
 
   // ── events ────────────────────────────────────────────────────────────
@@ -218,18 +300,32 @@ window.VAContext = function (app) {
       const c = e.target.closest(".ccard");
       if (c) return select(c.dataset.id);
       if (e.target.closest('[data-a="settings"]')) { app.showView("settings"); const p = $("#ctxSettings"); if (p) p.scrollIntoView(); }
+      if (e.target.closest('[data-a="addnote"]')) guard(() => noteDialog(null, ""))();
     });
     board.addEventListener("keydown", e => { const c = e.target.closest(".ccard"); if (c && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); select(c.dataset.id); } });
     board.addEventListener("mouseover", e => { const c = e.target.closest(".ccard"); if (c) highlight(c.dataset.id, true); });
     board.addEventListener("mouseout", e => { const c = e.target.closest(".ccard"); if (c && !c.contains(e.relatedTarget)) highlight(C.sel, !!C.sel); });
     $("#ctxDetail").addEventListener("click", guard(async e => {
+      const un = e.target.closest("[data-unlink]");
+      if (un) { await change({ action: "unlink", a: C.sel, b: un.dataset.unlink }); render(); return; }
       const b = e.target.closest("[data-a], .cd-link");
       if (!b) return;
       if (b.classList.contains("cd-link")) return select(b.dataset.id);
       if (b.dataset.a === "close") return select(C.sel);
       if (b.dataset.a === "ask") return askAbout(C.byId[C.sel]);
+      if (b.dataset.a === "linkto") return linkDialog(C.sel);
+      if (b.dataset.a === "addnote") return noteDialog(null, C.sel);
+      if (b.dataset.a === "edit") return noteDialog(C.byId[C.sel]);
+      if (b.dataset.a === "delete") {
+        if (!confirm("Delete the note \u201c" + C.byId[C.sel].title + "\u201d?")) return;
+        await change({ action: "delete_note", id: C.sel });
+        C.sel = "";
+        render();
+        return;
+      }
     }));
     $("#ctxSync").onclick = guard(sync);
+    $("#ctxAdd").onclick = guard(() => noteDialog(null, ""));   // the + Note button on a selected item pre-links it
     $("#ctxLoose").onchange = e => { C.loose = e.target.checked; render(); };
     let t = null;
     $("#ctxFilter").oninput = e => { clearTimeout(t); t = setTimeout(() => { C.filter = e.target.value.trim(); render(); }, 120); };

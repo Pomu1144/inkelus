@@ -13,6 +13,10 @@ title, branch or description, or a PR link / "owner/repo#12" / Jira key in
 an email. Linked items form a "thread", which is what the diagram draws and
 what the model gets as context.
 
+You can add your own items too ("notes": meeting notes, a Slack thread, a decision, a doc link) and draw
+links by hand between any two items. Those live in context_manual.json, so a sync never touches them, and
+they're merged into the graph the page draws and the model reads.
+
 A sync writes the result to context.json in the app's data folder, so the graph
 is there offline and on the next start. Credentials live in settings.json under
 "context" (masked whenever the page reads the settings).
@@ -63,13 +67,14 @@ DEFAULTS = {
 TOOLS = [
     {"type": "function", "function": {
         "name": "context_overview",
-        "description": "List the threads of linked work items (GitHub pull requests, Jira issues and emails that "
-                       "mention each other), most recently active first, with their ids.",
+        "description": "List the threads of linked work items (GitHub pull requests, Jira issues, emails and "
+                       "the user's notes that mention each other or that the user linked), most recently active "
+                       "first, with their ids.",
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
         "name": "context_search",
-        "description": "Search pull requests, Jira issues and emails by words in their title, text, author or "
-                       "status. Returns matching items with their ids.",
+        "description": "Search pull requests, Jira issues, emails and the user's notes by words in their "
+                       "title, text, author or status. Returns matching items with their ids.",
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string", "description": "Words to look for, e.g. 'login timeout' or 'ABC-123'"}},
             "required": ["query"]}}},
@@ -86,13 +91,15 @@ TOOL_NAMES = [t["function"]["name"] for t in TOOLS]
 SECRETS = ("gh_token", "jira_token", "mail_password")
 
 SYSTEM_PROMPT = (
-    "You can read the user's work context: GitHub pull requests, Jira issues and emails, linked where they "
-    "mention each other. Start with context_overview, use context_search to find items and context_item to "
-    "read one with everything linked to it. Connect the dots across sources (what the issue asks for, what "
-    "the PR changes, what people said by email) and cite item ids like ABC-123 or owner/repo#12."
+    "You can read the user's work context: GitHub pull requests, Jira issues, emails and notes the user added "
+    "themselves (meeting notes, decisions, things from other tools), linked where they mention each other or "
+    "where the user linked them. Start with context_overview, use context_search to find items and "
+    "context_item to read one with everything linked to it. Connect the dots across sources (what the issue "
+    "asks for, what the PR changes, what people said by email, what the user noted) and cite item ids like "
+    "ABC-123, owner/repo#12 or note:…."
 )
 
-KINDS = (("jira", "Jira"), ("pr", "Pull requests"), ("mail", "Email"))
+KINDS = (("jira", "Jira"), ("pr", "Pull requests"), ("mail", "Email"), ("note", "Notes"))
 
 
 def _lines(s):
@@ -384,16 +391,16 @@ def link(nodes, repos, projects=None):
     return sorted(edges)
 
 
-def sync(cfg):
-    """Fetch every configured source (on a worker thread) and return a Graph."""
-    repos = [r.strip("/") for r in _lines(cfg.get("gh_repos")) if r.strip("/").count("/") == 1]
-    projects = {p.upper() for p in _lines(cfg.get("jira_projects"))} or None
+def sync(cfg, extra_text=""):
+    """Fetch every configured source (on a worker thread) and return a Graph.
+    extra_text: your notes, so Jira issues they mention are fetched too."""
+    repos, projects = repos_and_projects(cfg)
     errors = []
     prs, err = fetch_github(cfg)
     errors += err
     mails, err = fetch_email(cfg)
     errors += err
-    keys = set()
+    keys = jira_keys(extra_text, projects)
     for n in prs + mails:
         keys |= jira_keys(n["scan"], projects)
     issues, err = fetch_jira(cfg, keys)
@@ -432,6 +439,89 @@ def masked(cfg, mask):
     return out
 
 
+def repos_and_projects(cfg):
+    repos = [r.strip("/") for r in _lines(cfg.get("gh_repos")) if r.strip("/").count("/") == 1]
+    return repos, {p.upper() for p in _lines(cfg.get("jira_projects"))} or None
+
+
+# ── Items and links you add yourself ───────────────────────────────────────
+class Manual:
+    """Notes you write and links you draw, kept apart from the sync so a sync never overwrites them."""
+
+    def __init__(self, path):
+        self.path = path
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            d = {}
+        self.notes = [n for n in d.get("notes") or [] if isinstance(n, dict) and n.get("id")]
+        self.links = [tuple(x) for x in d.get("links") or [] if isinstance(x, list) and len(x) == 2]
+
+    def save(self):
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"notes": self.notes, "links": [list(x) for x in self.links]}, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, self.path)
+
+    def text(self):
+        return "\n".join(n.get("title", "") + " " + n.get("text", "") for n in self.notes)
+
+    def put_note(self, data, note_id=""):
+        title = str(data.get("title") or "").strip()[:300]
+        if not title:
+            raise ValueError("Give the note a title.")
+        note = next((n for n in self.notes if n["id"] == note_id), None) if note_id else None
+        if note_id and note is None:
+            raise ValueError("That note was deleted.")
+        if note is None:
+            note = {"id": "note:" + os.urandom(5).hex(), "created": _iso(datetime.now(timezone.utc))}
+            self.notes.insert(0, note)
+        note.update(title=title, text=str(data.get("text") or "")[:20000], url=str(data.get("url") or "").strip()[:2000],
+                    source=str(data.get("source") or "").strip()[:60], updated=_iso(datetime.now(timezone.utc)))
+        for other in data.get("links") or []:
+            self.link(note["id"], str(other))
+        self.save()
+        return note
+
+    def delete_note(self, note_id):
+        self.notes = [n for n in self.notes if n["id"] != note_id]
+        self.links = [x for x in self.links if note_id not in x]
+        self.save()
+
+    def link(self, a, b):
+        if a and b and a != b:
+            pair = tuple(sorted((a, b)))
+            if pair not in self.links:
+                self.links.append(pair)
+
+    def unlink(self, a, b):
+        pair = tuple(sorted((a, b)))
+        self.links = [x for x in self.links if x != pair]
+        self.save()
+
+
+def combine(synced, manual, cfg):
+    """The synced graph plus your notes and links. Notes link by mention too (a Jira key or PR in the text)."""
+    repos, projects = repos_and_projects(cfg)
+    notes = [{"id": n["id"], "kind": "note", "title": n.get("title", ""), "state": "", "who": n.get("source") or "note",
+              "url": n.get("url", ""), "updated": n.get("updated", ""), "text": _clip(n.get("text", "")),
+              "fields": {"source": n.get("source", ""), "created": n.get("created", "")},
+              "scan": n.get("title", "") + " " + n.get("text", "")} for n in manual.notes]
+    nodes = [dict(n) for n in synced.nodes.values()] + notes
+    ids = {n["id"] for n in nodes}
+    mentions = []
+    for e in link(nodes, repos, projects):           # only links that involve a note are new here
+        if e[0].startswith("note:") or e[1].startswith("note:"):
+            mentions.append(e)
+    for n in nodes:
+        n.pop("scan", None)
+    hand = [x for x in manual.links if x[0] in ids and x[1] in ids]
+    g = Graph(nodes, list(synced.edges) + mentions + hand, synced.synced, synced.errors)
+    g.manual = set(hand)
+    return g
+
+
 def configured(cfg):
     return [label for key, label in (("gh_repos", "GitHub"), ("jira_url", "Jira"), ("mail_host", "Email"))
             if (cfg.get(key) or "").strip()]
@@ -441,7 +531,8 @@ def configured(cfg):
 class Graph:
     def __init__(self, nodes=(), edges=(), synced="", errors=()):
         self.nodes = {n["id"]: n for n in nodes}
-        self.edges = [tuple(e) for e in edges if e[0] in self.nodes and e[1] in self.nodes]
+        self.edges = sorted({tuple(sorted(e)) for e in edges if e[0] in self.nodes and e[1] in self.nodes})
+        self.manual = set()     # links drawn by hand (see combine)
         self.synced = synced
         self.errors = list(errors)
         self.adj = {i: set() for i in self.nodes}
@@ -471,7 +562,7 @@ class Graph:
 
     def for_page(self):
         """What the Context page draws: every item, the links, and the threads (lists of ids)."""
-        return dict(self.to_json(), threads=self.threads(),
+        return dict(self.to_json(), threads=self.threads(), manual=[list(e) for e in sorted(self.manual)],
                     loose=sorted((i for i in self.nodes if not self.adj[i]),
                                  key=lambda i: self.nodes[i].get("updated") or "", reverse=True))
 
@@ -516,18 +607,21 @@ class Graph:
         if n.get("state"):
             bits.append("[%s]" % n["state"])
         if n.get("who"):
-            bits.append("by %s" % n["who"] if n["kind"] != "jira" else "assignee %s" % n["who"])
+            bits.append("assignee %s" % n["who"] if n["kind"] == "jira" else "from %s" % n["who"]
+                        if n["kind"] == "note" else "by %s" % n["who"])
         if n.get("updated"):
             bits.append(n["updated"][:10])
         return " ".join(bits)
 
     def overview(self):
         if not self.nodes:
-            return "No work context synced yet. The user can add GitHub, Jira and email in Settings › Work " \
-                   "context and press Sync on the Context page."
+            return "No work context yet. The user can add GitHub, Jira and email in Settings › Work " \
+                   "context and press Sync on the Context page, or add notes there."
         counts = {k: sum(1 for n in self.nodes.values() if n["kind"] == k) for k, _l in KINDS}
-        out = ["Synced %s: %d pull requests, %d Jira issues, %d emails." % (
-            self.synced[:16].replace("T", " ") or "?", counts["pr"], counts["jira"], counts["mail"]), ""]
+        out = ["Synced %s: %d pull requests, %d Jira issues, %d emails%s." % (
+            self.synced[:16].replace("T", " ") or "never", counts["pr"], counts["jira"], counts["mail"],
+            ", plus %d note%s the user added" % (counts["note"], "" if counts["note"] == 1 else "s")
+            if counts["note"] else ""), ""]
         threads = self.threads()
         for t_i, group in enumerate(threads[:25], 1):
             out.append("Thread %d:" % t_i)

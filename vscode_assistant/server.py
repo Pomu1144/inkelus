@@ -62,8 +62,10 @@ class Hub:
         self.rt = realtime.Sessions(self.publish)   # open WebSocket / SSE connections
         self.oauth_pending = {}      # OAuth state -> {"auth", "vals", "verifier", "redirect"}
         self.context_path = os.path.join(self.store.dir, "context.json")
-        self.context = context.Graph.load(self.context_path)   # the last work-context sync
+        self.context_synced = context.Graph.load(self.context_path)   # the last work-context sync
+        self.context_manual = context.Manual(os.path.join(self.store.dir, "context_manual.json"))   # notes and links you add
         self.context_syncing = False
+        self.context_rebuild()
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
         self.clients = []           # one queue per open event stream
@@ -92,7 +94,11 @@ class Hub:
                 self.script_calls.pop(rid, None)
         return apirun.node_runner(ctx)
 
-    # work context: GitHub PRs, Jira issues and email, synced on a worker thread
+    # work context: GitHub PRs, Jira issues and email, synced on a worker thread, plus your own notes and links
+    def context_rebuild(self):
+        cfg = dict(context.DEFAULTS, **(self.store.settings.get("context") or {}))
+        self.context = context.combine(self.context_synced, self.context_manual, cfg)
+
     def context_sync(self):
         with self.lock:
             if self.context_syncing:
@@ -102,9 +108,10 @@ class Hub:
 
         def work():
             try:
-                g = context.sync(cfg)
+                g = context.sync(cfg, self.context_manual.text())
                 g.save(self.context_path)
-                self.context = g
+                self.context_synced = g
+                self.context_rebuild()
                 self.publish({"type": "context", "ok": True, "errors": g.errors, "count": len(g.nodes)})
             except Exception as e:      # keep the last good sync
                 self.publish({"type": "context", "ok": False, "errors": [str(e)]})
@@ -672,6 +679,7 @@ class Handler(BaseHTTPRequestHandler):
                 h.save_chats()
         if isinstance(b.get("context"), dict):
             context.update_settings(s.setdefault("context", {}), b["context"], KEY_MASK)
+            h.context_rebuild()
         for k in ("last_model", "default_conn", "web_theme"):
             if k in b:
                 s[k] = b[k]
@@ -768,12 +776,38 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET":
             return self.ok({"graph": h.context.for_page(), "syncing": h.context_syncing,
                             "sources": context.configured(h.store.settings.get("context") or {})})
-        if method == "POST" and (self.body().get("action") == "sync"):
+        if method != "POST":
+            return self.fail(405, "Method not allowed")
+        b = self.body()
+        act, m = b.get("action"), h.context_manual
+        if act == "sync":
             if not context.configured(h.store.settings.get("context") or {}):
                 return self.fail(400, "Add GitHub, Jira or email in Settings › Work context first.")
             h.context_sync()
             return self.ok({"syncing": True})
-        return self.fail(405, "Method not allowed")
+        with h.lock:
+            try:
+                if act == "note":            # add, or edit when an id is given
+                    note = m.put_note(b, b.get("id") or "")
+                elif act == "delete_note":
+                    m.delete_note(b.get("id") or "")
+                    note = None
+                elif act in ("link", "unlink"):
+                    a, c = str(b.get("a") or ""), str(b.get("b") or "")
+                    if a not in h.context.nodes or c not in h.context.nodes:
+                        return self.fail(400, "Both items have to be on the Context page.")
+                    if act == "link":
+                        m.link(a, c)
+                        m.save()
+                    else:
+                        m.unlink(a, c)
+                    note = None
+                else:
+                    return self.fail(400, "Unknown action")
+            except ValueError as e:
+                return self.fail(400, str(e))
+            h.context_rebuild()
+        return self.ok({"graph": h.context.for_page(), "note": note})
 
     def api_projects(self, method, parts, query):
         h = self.hub

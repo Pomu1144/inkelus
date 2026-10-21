@@ -72,8 +72,9 @@ on the start page. **Blue dark**, **Light** and **Match system** are in
   with reports, OpenAPI / Postman / curl import, WebSocket and SSE. It also
   runs your dev server and checks the endpoints in your code against the
   docs. See [API](#api) below.
-- **Context**: your GitHub pull requests, Jira issues and email in one
-  diagram, linked where they mention each other, and readable by the model.
+- **Context**: your GitHub pull requests, Jira issues and email, plus notes
+  you add yourself, in one diagram, linked where they mention each other or
+  where you linked them, and readable by the model.
   See [Context](#context) below.
 - **Library**: a place to keep **documents** (reference material the AI
   can read) and **templates** (examples of how answers should be laid out).
@@ -223,11 +224,21 @@ Linked items form a **thread**.
 
 **The diagram** has one band per thread, with Jira, pull request and email
 columns and lines between linked items (a dashed line joins an issue and an
-email directly). Hover an item to highlight its links; click it for its
+email directly). Notes you add get their own column. Hover an item to highlight its links; click it for its
 details, everything linked to it, **Open** (in GitHub or Jira) and **Ask
 about this**. Filter by words, and tick **Unlinked** to see items that don't
 mention anything else. Problems from a sync (a wrong token, a missing repo)
 show in the status line; click it for details.
+
+**Adding context by hand.** Not everything lives in GitHub, Jira or email.
+Press **Add note** to add your own: meeting notes, a Slack thread, a
+decision, a link to a document. A note that mentions `ABC-123` or a PR links
+to it automatically, and you can tick items to link it to when you write it
+(or press **+ Note** on a selected item). **Link to…** on any item draws a
+link by hand between two items that belong together but don't mention each
+other; links you drew show in purple and have a remove button. Notes and
+your links are kept in `context_manual.json`, so a sync never touches them,
+and notes work even with no sources set up.
 
 **Asking the model.** Turn on **Context** in a chat's header, or press **Ask
 about this** on an item. The model can list the threads, search everything,
