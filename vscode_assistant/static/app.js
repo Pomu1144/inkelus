@@ -6,6 +6,7 @@
   const $$ = s => Array.from(document.querySelectorAll(s));
   const esc = MD.esc;
   let Projects = null;   // projects.js, set up in start()
+  let Api = null;        // apiview.js
 
   const S = {
     settings: null, chats: [], library: { documents: [], templates: [] }, dataDir: "",
@@ -98,6 +99,7 @@
 
   function handleEvent(ev) {
     if (Projects && (ev.type === "term" || ev.type === "term_done" || ev.type === "chat" || ev.type === "tests")) Projects.onEvent(ev);
+    if (Api && ["server", "server_log", "script", "api_progress", "oauth", "rt", "rt_closed"].includes(ev.type)) Api.onEvent(ev);
     if (ev.type === "delta") {
       if (S.chat && ev.chat_id === S.chat.id) {
         S.chat.messages[ev.index] = ev.message;
@@ -218,6 +220,7 @@
   function showView(name) {
     if (S.view === "library" && name !== "library" && !libConfirmLeave()) return;
     if (S.view === "projects" && name !== "projects" && Projects && !Projects.leaving()) return;
+    if (S.view === "api" && name !== "api" && Api && !Api.leaving()) return;
     S.view = name;
     $$(".nav a").forEach(a => a.classList.toggle("active", a.dataset.view === name));
     $$(".view").forEach(v => (v.hidden = v.id !== "view-" + name));
@@ -226,6 +229,7 @@
     if (name === "settings") fillSettings();
     if (name === "passwords") renderVault();
     if (name === "projects") guard(Projects.show)();
+    if (name === "api") guard(Api.show)();
   }
 
   // ── Chat ─────────────────────────────────────────────────────────────
@@ -1338,6 +1342,8 @@
     setRail(railSaved === "1" || (railSaved === null && window.innerWidth < 900), false);
     Projects = window.VAProjects({ api, toast, guard, esc, openModal, closeModal, $, $$, S, showView, patchChat,
       renderChat, renderRail, newChat, currentModel, autosize });
+    Api = window.VAApi({ api, toast, guard, esc, openModal, closeModal, $, $$, S, showView, patchChat, renderChat,
+      renderRail, newChat, currentModel, autosize, download, Projects });
     wire();
     try {
       await loadState();

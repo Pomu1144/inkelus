@@ -23,7 +23,7 @@ MAX_OUTPUT = 20000
 TEST_COMMAND = [re.compile(p, re.I) for p in (
     r"(^|[\s/\\])(pytest|py\.test|tox|nox|jest|vitest|mocha|ava|karma|phpunit|rspec|ctest|playwright\s+test|cypress\s+run)(\s|$)",
     r"\b(npm|pnpm|yarn|bun)\s+(run\s+)?test",
-    r"\b(go|cargo|dotnet|mvn|mix|swift|flutter|deno|gradle|gradlew|sbt|lein|stack|cabal|zig\s+build)\s+test\b",
+    r"\b(go|cargo|dotnet|mvn|mvnw|mix|swift|flutter|deno|gradle|gradlew|sbt|lein|stack|cabal|zig\s+build|ant)(\.cmd|\.bat)?\"?\s+(test|verify|check)\b",
     r"\bmake\s+(test|check)\b",
     r"-m\s+(pytest|unittest|nose2?)\b",
     r"\bmanage\.py\s+test\b",
@@ -63,6 +63,24 @@ def parse(output, code):
                         key = {"passing": "passed", "failing": "failed", "pending": "skipped",
                                "ignored": "skipped"}.get(word.lower(), word.lower())
                         counts[key] = counts.get(key, 0) + int(n)
+    junit = re.findall(r"Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)(?:,\s*Skipped:\s*(\d+))?", out)
+    if junit:                                                                # Maven Surefire, Ant JUnit
+        if re.search(r"^\[\w+\]\s+Results:", out, re.M):
+            run, fail, err, skip = junit[-1]                                # Maven prints the total last
+        else:
+            run, fail, err, skip = (sum(int(x[i] or 0) for x in junit) for i in range(4))   # Ant: one line per class
+        run, fail, err, skip = int(run), int(fail), int(err), int(skip or 0)
+        counts = {"passed": run - fail - err - skip, "failed": fail}
+        if err:
+            counts["errors"] = err
+        if skip:
+            counts["skipped"] = skip
+    g = re.search(r"(\d+) tests? completed(?:, (\d+) failed)?(?:, (\d+) skipped)?", out)   # Gradle
+    if g and not junit:
+        done, fail, skip = int(g.group(1)), int(g.group(2) or 0), int(g.group(3) or 0)
+        counts = {"passed": done - fail - skip, "failed": fail}
+        if skip:
+            counts["skipped"] = skip
     m = re.search(r"^Ran (\d+) tests? in", out, re.M)                     # unittest
     if m and not counts:
         total = int(m.group(1))
@@ -82,7 +100,8 @@ def parse(output, code):
         elif plain_fail or plain_pass:
             counts = {"passed": plain_pass, "failed": plain_fail}
     failures = []
-    for rx in (r"^FAILED\s+(\S+)", r"^\s*--- FAIL:\s+(\S+)", r"^FAIL:\s+(\S+(?: \([^)]*\))?)", r"^ERROR:\s+(\S+(?: \([^)]*\))?)",
+    for rx in (r"^\[ERROR\]\s+(\w[\w.$]*\.\w+(?:\(\))?)(?::\d+)?\s", r"^\s*(?:\[junit\]\s+)?Testcase:\s+(\S+?\([^)]*\)):\s+(?:FAILED|Caused an ERROR)",
+               r"^(\S+ > .+?) FAILED$", r"^FAILED\s+(\S+)", r"^\s*--- FAIL:\s+(\S+)", r"^FAIL:\s+(\S+(?: \([^)]*\))?)", r"^ERROR:\s+(\S+(?: \([^)]*\))?)",
                r"^\s*[✕✗×]\s+(.+?)(?:\s+\(\d+\s*ms\))?$", r"^\s*FAIL\s+(\S+)", r"^test (\S+) \.\.\. FAILED"):
         for name in re.findall(rx, out, re.M):
             name = name.strip()
@@ -126,7 +145,7 @@ def guess_command(root):
     if os.path.exists(j("go.mod")):
         return "go test ./..."
     if os.path.exists(j("pom.xml")):
-        return "mvn test"
+        return mvn(root) + " test"
     if os.path.exists(j("gradlew")) or os.path.exists(j("gradlew.bat")):
         return ("gradlew.bat" if sys.platform == "win32" else "./gradlew") + " test"
     if os.path.exists(j("build.gradle")) or os.path.exists(j("build.gradle.kts")):
@@ -149,6 +168,8 @@ def guess_command(root):
     test_files = any(re.match(r"(test_.*|.*_test)\.py$", n) for n in names)
     if pyish or test_files or (tests_dir and any(n.endswith(".py") for n in names)):
         return py + " -m pytest"
+    if os.path.exists(j("build.xml")):                                       # Ant, e.g. a NetBeans project
+        return ant() + " test"
     try:
         with open(j("Makefile"), encoding="utf-8", errors="replace") as f:
             if re.search(r"^test:", f.read(), re.M):
@@ -274,3 +295,34 @@ class TestLog:
             lines.append("Suggested tests not done yet: " + "; ".join(
                 s["title"] + (" [failing]" if s["status"] == "failed" else "") for s in todo[:10]))
         return "\n".join(lines)
+
+
+def mvn(root):
+    """The Maven command for a project: its wrapper if it has one."""
+    if os.path.exists(os.path.join(root, "mvnw.cmd" if sys.platform == "win32" else "mvnw")):
+        return "mvnw.cmd" if sys.platform == "win32" else "./mvnw"
+    return "mvn"
+
+
+def ant():
+    """The Ant command: ant on the PATH, or the copy that comes with NetBeans."""
+    import glob
+    import shutil
+    if shutil.which("ant"):
+        return "ant"
+    home = os.path.expanduser("~")
+    if sys.platform == "win32":
+        bases = [os.environ.get(v, "") for v in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")]
+        pats = [os.path.join(b, d, "extide", "ant", "bin", "ant.bat") for b in bases if b
+                for d in ("NetBeans*", os.path.join("NetBeans*", "netbeans"), "Apache NetBeans*", os.path.join("Apache", "NetBeans*"))]
+    elif sys.platform == "darwin":
+        pats = ["/Applications/*NetBeans*.app/Contents/Resources/netbeans/extide/ant/bin/ant",
+                "/Applications/*NetBeans*.app/Contents/Resources/NetBeans/netbeans/extide/ant/bin/ant"]
+    else:
+        pats = [os.path.join(home, "netbeans*", "extide", "ant", "bin", "ant"), os.path.join(home, "netbeans*", "netbeans", "extide", "ant", "bin", "ant"),
+                "/usr/local/netbeans*/extide/ant/bin/ant", "/opt/netbeans*/extide/ant/bin/ant", "/opt/netbeans*/netbeans/extide/ant/bin/ant",
+                "/usr/share/netbeans*/extide/ant/bin/ant", "/snap/netbeans/current/netbeans/extide/ant/bin/ant"]
+    found = sorted({p for pat in pats for p in glob.glob(pat)}, reverse=True)
+    if found:
+        return '"%s"' % found[0] if " " in found[0] else found[0]
+    return "ant"

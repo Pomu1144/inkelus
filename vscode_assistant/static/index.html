@@ -17,6 +17,7 @@
     <nav class="nav">
       <a data-view="chat" class="active" title="Chat"><svg viewBox="0 0 16 16"><path d="M2 3h12v8H7l-4 3v-3H2z"/></svg><span class="lbl">Chat</span></a>
       <a data-view="projects" title="Projects"><svg viewBox="0 0 16 16"><path d="M1.5 3.5h5l1.5 1.5h6.5v8.5h-13z M5.5 8l-1.5 1.5 1.5 1.5 M10.5 8l1.5 1.5-1.5 1.5"/></svg><span class="lbl">Projects</span></a>
+      <a data-view="api" title="API"><svg viewBox="0 0 16 16"><path d="M2 5h12M2 11h12M5 2.5L3 5l2 2.5M11 8.5l2 2.5-2 2.5"/></svg><span class="lbl">API</span></a>
       <a data-view="models" title="Models"><svg viewBox="0 0 16 16"><path d="M8 1.5l6 3.5v6l-6 3.5-6-3.5V5z M2 5l6 3.5L14 5 M8 8.5V14.5"/></svg><span class="lbl">Models</span></a>
       <a data-view="library" title="Library"><svg viewBox="0 0 16 16"><path d="M3 1.5h8v11H3z M5 4.5h4 M5 7h4 M13 4v10.5H5"/></svg><span class="lbl">Library</span></a>
       <a data-view="passwords" title="Passwords"><svg viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg><span class="lbl">Passwords</span></a>
@@ -104,6 +105,7 @@
         </div>
       </div>
       <div class="ws" id="projWs" hidden>
+        <div class="taskbar" id="taskBar" hidden></div>
         <div class="gitbar" id="gitBar"></div>
         <div class="ws-body">
           <aside class="ws-side">
@@ -147,6 +149,38 @@
               <pre class="term-out" id="termOut"></pre>
             </div>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- API -->
+    <section class="view" id="view-api" hidden>
+      <header class="head">
+        <h1>API</h1>
+        <div class="tools">
+          <label class="picker"><span>PROJECT</span><select id="apiProject"></select></label>
+          <label class="picker"><span>ENVIRONMENT</span><select id="apiEnv"></select></label>
+          <button class="btn" id="apiEnvEdit" title="Environments and globals">Variables</button>
+          <button class="btn" id="apiImport">Import</button>
+          <button class="btn" id="apiCookies">Cookies</button>
+          <button class="btn" id="apiSettings" title="Timeouts, certificates, proxy">Settings</button>
+          <button class="btn primary" id="apiNew"><i data-icon="plus"></i>New</button>
+        </div>
+      </header>
+      <div class="api-server" id="apiServer" hidden></div>
+      <div class="api-body">
+        <aside class="api-side">
+          <div class="tabs side-tabs">
+            <button class="tab active" data-aside="collections">Collections</button>
+            <button class="tab" data-aside="history">History</button>
+            <button class="tab" data-aside="endpoints" id="apiEndpTab">Endpoints</button>
+          </div>
+          <div class="api-filter"><input id="apiFilter" type="search" placeholder="Filter"></div>
+          <div class="api-list" id="apiSide"></div>
+        </aside>
+        <div class="api-main">
+          <div class="tabstrip" id="apiTabs"></div>
+          <div class="api-editor" id="apiEditor"></div>
         </div>
       </div>
     </section>
@@ -344,6 +378,7 @@
 <script src="/static/markdown.js"></script>
 <script src="/static/vault.js"></script>
 <script src="/static/projects.js"></script>
+<script src="/static/apiview.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

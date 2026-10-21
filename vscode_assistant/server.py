@@ -11,10 +11,13 @@ Every API call must carry the random token that is baked into the page, and
 the Host header must be localhost, so other web pages can't drive it.
 """
 import base64
+import csv
+import html
 import json
 import mimetypes
 import os
 import queue
+import re
 import secrets
 import shutil
 import subprocess
@@ -22,11 +25,12 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import agent_browser, engine, gitops, net, projects, providers, web
+from . import agent_browser, api, apirun, engine, gitops, net, projects, providers, realtime, tasks, web
 from .library import KINDS, Library
 from .store import Store, new_id
 
@@ -48,6 +52,15 @@ class Hub:
         self.projects = projects.Projects(self.store)
         self.projects.tests.publish = self.publish
         self.projects.library = self.library
+        self.api = api.Store(self.store.dir)
+        self.servers = api.Servers(self.publish)
+        self.projects.api = self.api
+        self.projects.servers = self.servers
+        self.projects.script_runner = self.run_script
+        self.script_calls = {}       # script run id -> {"event", "result"} (scripts run in the app window's sandbox)
+        self.api_reports = {}        # collection run reports, for downloading
+        self.rt = realtime.Sessions(self.publish)   # open WebSocket / SSE connections
+        self.oauth_pending = {}      # OAuth state -> {"auth", "vals", "verifier", "redirect"}
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
         self.clients = []           # one queue per open event stream
@@ -60,6 +73,57 @@ class Hub:
         self.seen_client = False
         self.last_client = time.time()
         engine.agent_for(self.store).credential_provider = self.request_credential
+
+    # API scripts run in the app window's sandboxed worker (or Node.js when no window is open)
+    def run_script(self, ctx):
+        with self.lock:
+            has_window = bool(self.clients)
+        if has_window:
+            rid = secrets.token_hex(8)
+            box = self.script_calls[rid] = {"event": threading.Event(), "result": None}
+            self.publish({"type": "script", "id": rid, "ctx": ctx})
+            try:
+                if box["event"].wait(12) and isinstance(box["result"], dict):
+                    return box["result"]
+            finally:
+                self.script_calls.pop(rid, None)
+        return apirun.node_runner(ctx)
+
+    # OAuth 2.0 authorization code: the user signs in in a browser window, which comes back to /oauth/callback
+    def oauth_begin(self, auth, vals, redirect):
+        import hashlib
+        state = secrets.token_urlsafe(16)
+        verifier = secrets.token_urlsafe(48)
+        f = lambda k: api.fill(auth.get(k), vals)
+        if not f("auth_url"):
+            raise ValueError("OAuth 2.0: set the authorization URL.")
+        q = {"response_type": "code", "client_id": f("client_id"), "redirect_uri": redirect, "state": state}
+        if f("scope"):
+            q["scope"] = f("scope")
+        if f("audience"):
+            q["audience"] = f("audience")
+        if auth.get("pkce", True):
+            q["code_challenge"] = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+            q["code_challenge_method"] = "S256"
+        self.oauth_pending[state] = {"auth": auth, "vals": vals, "verifier": verifier, "redirect": redirect, "when": time.time()}
+        return f("auth_url") + ("&" if "?" in f("auth_url") else "?") + urllib.parse.urlencode(q)
+
+    def oauth_finish(self, state, code, error=""):
+        p = self.oauth_pending.pop(state, None)
+        if not p:
+            return False, "This sign-in link has expired. Press Get new token again."
+        if error or not code:
+            return False, "The sign-in was cancelled or refused: %s" % (error or "no code")
+        form = {"grant_type": "authorization_code", "code": code, "redirect_uri": p["redirect"]}
+        if p["auth"].get("pkce", True):
+            form["code_verifier"] = p["verifier"]
+        try:
+            api.store_token(self.api, p["auth"], p["vals"], api.token_request(p["auth"], p["vals"], form))
+        except ValueError as e:
+            self.publish({"type": "oauth", "ok": False, "error": str(e)})
+            return False, str(e)
+        self.publish({"type": "oauth", "ok": True})
+        return True, "Signed in. You can close this window and go back to the app."
 
     # saved logins
     def request_credential(self, chat_id, host, url, fields):
@@ -255,6 +319,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.static(STATIC, path[len("/static/"):])
             if method == "GET" and path.startswith("/assets/"):
                 return self.static(ASSETS, path[len("/assets/"):])
+            if method == "GET" and path == "/oauth/callback":
+                ok, msg = self.hub.oauth_finish((query.get("state") or [""])[0], (query.get("code") or [""])[0],
+                                                (query.get("error_description") or query.get("error") or [""])[0])
+                return self.send(200 if ok else 400, "<!doctype html><meta charset=utf-8><title>Sign-in</title>"
+                                 "<body style='font:15px system-ui;padding:40px;background:#262624;color:#f5f4ef'><p>%s</p>"
+                                 "<script>setTimeout(()=>window.close(),1500)</script>" % html.escape(msg), "text/html; charset=utf-8")
             if not path.startswith("/api/"):
                 return self.fail(404, "Not found")
             if not self.authed(query):
@@ -299,8 +369,12 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(p)[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript",):
             ctype += "; charset=utf-8"
+        headers = None
+        if os.path.basename(p) == "pmsandbox.js":
+            # API scripts run in a worker made from this file: they may run code, but not load or fetch anything
+            headers = {"Content-Security-Policy": "default-src 'none'; script-src 'self' 'unsafe-eval'"}
         with open(p, "rb") as f:
-            self.send(200, f.read(), ctype)
+            self.send(200, f.read(), ctype, headers)
 
     # ── API ─────────────────────────────────────────────────────────────
     def api_events(self, method, parts, query):
@@ -717,6 +791,8 @@ class Handler(BaseHTTPRequestHandler):
         arg = lambda k: (query.get(k) or [""])[0]
         if sub == "files" and method == "GET":
             return self.ok({"files": p.files(), "root": p.root})
+        if sub == "tasks" and method == "GET":
+            return self.ok(tasks.detect(p.root))
         if sub == "file":
             if method == "GET":
                 full = p.resolve(arg("path"), allow_root=False)
@@ -922,6 +998,354 @@ class Handler(BaseHTTPRequestHandler):
         text = text.split("</think>")[-1].strip().strip("`").strip()
         return text
 
+    def api_http(self, method, parts, query):
+        """The API tab: requests, collections, environments, history, cookies, auth, runs, endpoints, dev server."""
+        h = self.hub
+        A = h.api
+        sub = parts[0] if parts else ""
+        arg = lambda k: (query.get(k) or [""])[0]
+        b = self.body() if method in ("POST", "PUT", "PATCH") else {}
+        pid = b.get("project", arg("project")) or ""
+        proj = h.projects.get(pid) if pid else None
+        if pid and not proj:
+            return self.fail(404, "That project was removed.")
+
+        def env_for():
+            eid = b.get("env")
+            return next((e for e in A.data["environments"] if e["id"] == eid), None) if eid else A.env(pid)
+
+        # the dev server's address is the fallback {{baseUrl}}; a collection or environment value wins
+        defaults = {"baseUrl": proj.server_config()["url"].rstrip("/")} if proj is not None else {}
+
+        def placed(req):
+            """(collection, chain) for a request being edited: where it lives, for inherited auth and scripts."""
+            col = A.collection(b.get("collection") or "")
+            if not col:
+                return None, None
+            node, chain = apirun.api.find(col, req.get("id"))
+            if node is None and b.get("parent"):
+                parent, chain = apirun.api.find(col, b["parent"])
+                chain = chain if parent is not None and parent.get("folder") else [col]
+            if node is None:
+                chain = (chain or [col]) + [req]
+            return col, chain
+
+        if proj is not None:
+            A.load_shared(pid, proj.root)       # keep collections from the project's .api folder current
+        if sub == "state" and method == "GET":
+            out = A.scope(pid, proj.root if proj else None)
+            out["node"] = bool(shutil.which("node"))
+            if proj is not None:
+                out["server"] = dict(h.servers.status(pid), config=proj.server_config(), saved=proj.data.get("dev_server") or {})
+                out["tasks"] = tasks.detect(proj.root)
+            return self.ok(out)
+        if sub == "send" and method == "POST":
+            req = b.get("request") or {}
+            col, chain = placed(req)
+            runner = apirun.Runner(A, pid, h.run_script, defaults=defaults)
+            env = env_for()
+            r = runner.execute(col, req, chain, env)
+            res = r["response"]
+            A.add_history(pid, req, res, "you")
+            res["sent_headers"] = [[k, v] for k, v in res.get("sent_headers") or []]
+            out = dict(res, checks=r["checks"], tests=r["tests"], console=r["console"], script_errors=r["script_errors"])
+            return self.ok(out)
+        if sub == "script" and method == "POST":       # a script result from the app window's sandbox
+            box = h.script_calls.get(b.get("id"))
+            if box and not box["event"].is_set():
+                box["result"] = b.get("result")
+                box["event"].set()
+            return self.ok()
+        if sub == "code" and method == "POST":
+            req = b.get("request") or {}
+            col, chain = placed(req)
+            runner = apirun.Runner(A, pid, defaults=defaults)
+            vals = runner.merged(runner.scopes(col, env_for()))
+            auth = apirun.api.effective_auth(chain) if chain else req.get("auth")
+            return self.ok({"code": api.codegen(b.get("lang") or "curl", req, vals, auth, A)})
+        if sub == "rt" and method == "POST":
+            act = b.get("action")
+            if act == "open":
+                req = b.get("request") or {}
+                runner = apirun.Runner(A, pid, defaults=defaults)
+                col, chain = placed(req)
+                vals = runner.merged(runner.scopes(col, env_for()))
+                url = api.fill(req.get("url"), vals).strip()
+                if req.get("kind") == "ws" and url.startswith("http"):
+                    url = "ws" + url[4:]
+                hdrs = [(api.fill(x["key"], vals), api.fill(x.get("value"), vals)) for x in req.get("headers") or []
+                        if x.get("enabled", True) and x.get("key")]
+                auth = apirun.api.effective_auth(chain) if chain else req.get("auth") or {}
+                if auth.get("type") == "bearer" and auth.get("token"):
+                    hdrs.append(("Authorization", "Bearer " + api.fill(auth["token"], vals)))
+                try:
+                    return self.ok(h.rt.open(req.get("kind"), url, hdrs, api.fill(req.get("protocols"), vals),
+                                             verify=A.settings().get("verify", True)))
+                except (OSError, ConnectionError, ValueError) as e:
+                    return self.fail(400, "Couldn't connect: %s" % (getattr(e, "reason", None) or e))
+            if act == "send":
+                h.rt.send(b.get("id"), str(b.get("text") or ""))
+                return self.ok()
+            if act == "close":
+                h.rt.close(b.get("id"))
+                return self.ok()
+        if sub == "files" and method == "POST":
+            return self.ok({"file": A.add_file(b.get("name"), base64.b64decode(b.get("data") or ""))})
+        if sub == "collections":
+            cid = parts[1] if len(parts) > 1 else ""
+            if method == "POST" and not cid:
+                col = api.blank_collection(str(b.get("name") or "New collection")[:100], pid)
+                if isinstance(b.get("items"), list):
+                    col["items"] = b["items"]
+                with A.lock:
+                    A.data["collections"].append(col)
+                    A.save()
+                return self.ok({"collection": col})
+            col = A.collection(cid)
+            if not col:
+                return self.fail(404, "That collection is gone.")
+            if method == "PUT":
+                with A.lock:
+                    for k in ("name", "description", "pre_script", "test_script"):
+                        if k in b:
+                            col[k] = str(b[k])[:200 if k == "name" else 200000] or (col[k] if k == "name" else "")
+                    for k in ("items", "variables"):
+                        if isinstance(b.get(k), list):
+                            col[k] = b[k]
+                    if isinstance(b.get("auth"), dict):
+                        col["auth"] = b["auth"]
+                    A.persist(col)
+                return self.ok({"collection": col})
+            if method == "DELETE":
+                with A.lock:
+                    if col.get("location") == "project":
+                        A.move(col, "app")
+                    A.data["collections"] = [c for c in A.data["collections"] if c["id"] != cid]
+                    A.save()
+                return self.ok()
+            if method == "POST" and len(parts) > 2 and parts[2] == "move":
+                return self.ok({"collection": A.move(col, b.get("to"), proj.root if proj else None)})
+            if method == "GET" and len(parts) > 2 and parts[2] == "export":
+                safe = "".join(ch for ch in col["name"] if ch.isalnum() or ch in " -_").strip() or "collection"
+                return self.send(200, json.dumps(api.to_postman(col), indent=2, ensure_ascii=False), "application/json; charset=utf-8",
+                                 {"Content-Disposition": "attachment; filename*=UTF-8''" + quote(safe + ".postman_collection.json")})
+            if method == "POST" and len(parts) > 2 and parts[2] == "run":
+                folder = apirun.api.find(col, b.get("folder"))[0] if b.get("folder") else None
+                try:
+                    data = apirun.parse_data(b.get("data") or "", b.get("data_name") or "")
+                except (ValueError, csv.Error) as e:
+                    return self.fail(400, "The data file couldn't be read: %s" % e)
+                env = env_for()
+                run_id = b.get("run") or ""
+
+                def progress(res):
+                    if not run_id:
+                        return
+                    r = res.get("response") or {}
+                    h.publish({"type": "api_progress", "run": run_id, "result": {
+                        "name": res.get("name"), "iteration": res.get("iteration"), "skipped": res.get("skipped"),
+                        "pass": res.get("pass"), "checks": res.get("checks"), "tests": res.get("tests"),
+                        "script_errors": res.get("script_errors"),
+                        "response": {k: r.get(k) for k in ("method", "status", "ms", "error")}}})
+                rep = apirun.Runner(A, pid, h.run_script, defaults=defaults).run(col, env, folder, int(b.get("iterations") or 1), data,
+                                                              int(b.get("delay") or 0), bool(b.get("bail")), progress)
+                secrets = api.variables(env)[1]
+                if pid:
+                    h.projects.tests.add_run(pid, "API: " + (folder or col)["name"], 1 if rep["failed"] else 0,
+                                             apirun.text_report(rep, secrets), "you", rep["seconds"])
+                rid = api.new_id()
+                h.api_reports[rid] = rep
+                for k in list(h.api_reports)[:-20]:
+                    del h.api_reports[k]
+                return self.ok(dict(json.loads(apirun.json_report(rep)), report=rid))
+        if sub == "reports" and method == "GET" and len(parts) > 1:
+            rep = h.api_reports.get(parts[1])
+            if not rep:
+                return self.fail(404, "That report is gone; run the collection again.")
+            fmt = arg("format") or "html"
+            body, ctype, ext = {"junit": (apirun.junit_report(rep), "application/xml", "xml"),
+                                "json": (apirun.json_report(rep), "application/json", "json")}.get(fmt, (apirun.html_report(rep), "text/html", "html"))
+            name = "".join(ch for ch in rep["name"] if ch.isalnum() or ch in " -_").strip() or "report"
+            return self.send(200, body, ctype + "; charset=utf-8",
+                             {"Content-Disposition": "attachment; filename*=UTF-8''" + quote("%s report.%s" % (name, ext))})
+        if sub == "import" and method == "POST":
+            text = (b.get("text") or "").strip()
+            target = A.collection(b.get("collection") or "")
+            if text.startswith("curl"):
+                r = api.from_curl(text)
+                with A.lock:
+                    if not target:
+                        target = api.blank_collection("Imported", pid)
+                        A.data["collections"].append(target)
+                    target["items"].append(r)
+                    A.save()
+                return self.ok({"collection": target, "request": r})
+            try:
+                doc = json.loads(text)
+            except ValueError:
+                try:
+                    doc = api.load_yaml(text)
+                except ValueError:
+                    return self.fail(400, "Paste a curl command, a Postman collection or environment, or an OpenAPI spec (JSON or YAML).")
+            with A.lock:
+                if isinstance(doc, dict) and ("openapi" in doc or "swagger" in doc):
+                    col, env = api.from_openapi(doc)
+                elif isinstance(doc, dict) and "values" in doc and "item" not in doc:
+                    env = api.env_from_postman(doc)
+                    env["project"] = pid
+                    A.data["environments"].append(env)
+                    A.save()
+                    return self.ok({"environment": env})
+                else:
+                    col, env = api.from_postman(doc)
+                col["project"] = pid
+                A.data["collections"].append(col)
+                if env:
+                    env["project"] = pid
+                    A.data["environments"].append(env)
+                A.save()
+            return self.ok({"collection": col, "environment": env})
+        if sub == "environments":
+            eid = parts[1] if len(parts) > 1 else ""
+            with A.lock:
+                if method == "POST" and not eid:
+                    env = {"id": api.new_id(), "name": str(b.get("name") or "New environment")[:100], "project": pid,
+                           "vars": b.get("vars") if isinstance(b.get("vars"), list) else
+                           [{"key": "baseUrl", "value": proj.server_config()["url"] if proj else "http://localhost:3000",
+                             "secret": False, "enabled": True}]}
+                    A.data["environments"].append(env)
+                    A.data["active_env"][pid] = env["id"]
+                    A.save()
+                    return self.ok({"environment": env})
+                env = next((e for e in A.data["environments"] if e["id"] == eid), None)
+                if not env:
+                    return self.fail(404, "That environment is gone.")
+                if method == "GET" and len(parts) > 2 and parts[2] == "export":
+                    return self.send(200, json.dumps(api.env_to_postman(env), indent=2, ensure_ascii=False), "application/json; charset=utf-8",
+                                     {"Content-Disposition": "attachment; filename*=UTF-8''" + quote(env["name"] + ".postman_environment.json")})
+                if method == "PUT":
+                    if "name" in b:
+                        env["name"] = str(b["name"])[:100] or env["name"]
+                    if isinstance(b.get("vars"), list):
+                        env["vars"] = [{"key": str(v.get("key") or "").strip()[:100], "value": str(v.get("value") or ""),
+                                        "secret": bool(v.get("secret")), "enabled": v.get("enabled", True) is not False}
+                                       for v in b["vars"] if isinstance(v, dict) and str(v.get("key") or "").strip()]
+                    A.save()
+                    return self.ok({"environment": env})
+                if method == "DELETE":
+                    A.data["environments"] = [e for e in A.data["environments"] if e["id"] != eid]
+                    A.save()
+                    return self.ok()
+        if sub == "globals" and method == "PUT":
+            with A.lock:
+                A.data["globals"][pid] = [{"key": str(v.get("key") or "").strip(), "value": str(v.get("value") or ""), "enabled": True}
+                                          for v in b.get("vars") or [] if isinstance(v, dict) and str(v.get("key") or "").strip()]
+                A.save()
+            return self.ok()
+        if sub == "active_env" and method == "POST":
+            with A.lock:
+                A.data["active_env"][pid] = b.get("env") or ""
+                A.save()
+            return self.ok()
+        if sub == "settings" and method == "PUT":
+            with A.lock:
+                s = A.data["settings"]
+                for k in ("timeout_ms",):
+                    if k in b:
+                        s[k] = max(100, min(int(b[k] or 30000), 600000))
+                for k in ("follow", "verify", "cookies"):
+                    if k in b:
+                        s[k] = bool(b[k])
+                for k in ("proxy", "cert", "key", "passphrase"):
+                    if k in b:
+                        s[k] = str(b[k] or "").strip()
+                A.save()
+            return self.ok({"settings": A.settings()})
+        if sub == "history" and method == "DELETE":
+            with A.lock:
+                A.data["history"] = [x for x in A.data["history"] if x.get("project", "") != pid]
+                A.save()
+            return self.ok()
+        if sub == "cookies":
+            jar = A.jar(pid)
+            if method == "GET":
+                return self.ok({"cookies": [{"domain": c.domain, "path": c.path, "name": c.name, "value": c.value or "",
+                                             "expires": c.expires, "secure": c.secure} for c in jar]})
+            if method == "DELETE":
+                dom, name = arg("domain"), arg("name")
+                if dom and name:
+                    try:
+                        jar.clear(dom, arg("path") or "/", name)
+                    except KeyError:
+                        pass
+                elif dom:
+                    try:
+                        jar.clear(dom)
+                    except KeyError:
+                        pass
+                else:
+                    jar.clear()
+                A.save_jar(pid)
+                return self.ok()
+        if sub == "oauth" and method == "POST":
+            req = b.get("request") or {}
+            col, chain = placed(req)
+            auth = apirun.api.effective_auth(chain) if chain else req.get("auth") or {}
+            if auth.get("type") != "oauth2":
+                return self.fail(400, "This request doesn't use OAuth 2.0.")
+            runner = apirun.Runner(A, pid, defaults=defaults)
+            vals = runner.merged(runner.scopes(col, env_for()))
+            if b.get("action") == "clear":
+                with A.lock:
+                    A.data["tokens"].pop(api._token_key(auth, vals), None)
+                    A.save()
+                return self.ok()
+            if (auth.get("grant") or "client_credentials") in ("client_credentials", "password"):
+                tok = api.oauth_token(A, auth, vals, force=True)
+                return self.ok({"token": tok[:12] + "…", "done": True})
+            return self.ok({"url": h.oauth_begin(auth, vals, "http://127.0.0.1:%d/oauth/callback" % self.server.server_address[1])})
+        if proj is None and sub in ("endpoints", "compare", "server", "docs"):
+            return self.fail(400, "Pick a project first.")
+        if sub == "endpoints" and method == "GET":
+            return self.ok({"routes": api.find_routes(proj)})
+        if sub == "docs" and method == "GET":
+            # documentation files to compare with: Markdown/text docs, the likely API ones first
+            files = [f for f in proj.files() if re.search(r"\.(md|markdown|txt|rst|adoc)$", f, re.I)]
+            def score(f):
+                n = f.lower()
+                return (0 if "api" in n else 1 if n.startswith("docs/") or "/docs/" in n else 2 if "readme" in n else 3, n)
+            return self.ok({"files": sorted(files, key=score)[:200]})
+        if sub == "compare" and method == "POST":
+            docs = []
+            for f in (b.get("files") or [])[:30]:
+                try:
+                    docs.append((f, projects.read_text(proj.resolve(f, allow_root=False))[0]))
+                except projects.ToolError:
+                    pass
+            if not docs:
+                return self.fail(400, "Pick at least one documentation file.")
+            result = api.compare(api.find_routes(proj), docs)
+            if b.get("suggest"):
+                items = [{"title": "Document %s %s" % (r["method"], r["path"]), "file": docs[0][0],
+                          "why": "It's in the code (%s:%s) but not in the docs." % (r["file"], r["line"])} for r in result["undocumented"]]
+                items += [{"title": "Docs mention %s %s, which isn't in the code" % (d["method"], d["path"]), "file": d["file"],
+                           "why": "Remove it from %s or add the endpoint." % d["file"]} for d in result["stale"]]
+                h.projects.tests.suggest(pid, items, "you")
+            return self.ok(result)
+        if sub == "server" and method == "POST":
+            act = b.get("action")
+            if "command" in b or "url" in b:
+                h.projects.update(pid, {"dev_server": {"command": b.get("command", ""), "url": b.get("url", "")}})
+                proj = h.projects.get(pid)
+            cfg = proj.server_config()
+            if act == "start":
+                h.servers.stop(pid)
+                h.servers.start(pid, cfg["command"], cfg["url"], proj.root)
+            elif act == "stop":
+                h.servers.stop(pid)
+            return self.ok(dict(h.servers.status(pid), config=cfg))
+        return self.fail(404, "Unknown API action")
+
     def api_agent(self, method, parts, query):
         """Open the agent browser window, e.g. so the user can log in to sites first."""
         if method == "POST" and parts == ["open"]:
@@ -1088,6 +1512,8 @@ def serve(port=8765, open_page=True, app_window=True, idle_exit=True):
     except KeyboardInterrupt:
         pass
     finally:
+        hub.servers.stop_all()       # dev servers started from the app stop with it
+        hub.rt.close_all()
         httpd.server_close()
 
 
