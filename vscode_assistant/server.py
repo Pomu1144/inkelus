@@ -773,6 +773,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_context(self, method, parts, query):
         h = self.hub
+        item = (query.get("item") or [""])[0]
+        if method == "GET" and item:
+            n = h.context.nodes.get(item)
+            return self.ok({"item": n}) if n else self.fail(404, "That item is gone; sync again.")
         if method == "GET":
             return self.ok({"graph": h.context.for_page(), "syncing": h.context_syncing,
                             "sources": context.configured(h.store.settings.get("context") or {})})
@@ -807,7 +811,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 return self.fail(400, str(e))
             h.context_rebuild()
-        return self.ok({"graph": h.context.for_page(), "note": note})
+        return self.ok({"note": note})     # the page reloads the graph itself
 
     def api_projects(self, method, parts, query):
         h = self.hub

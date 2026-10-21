@@ -265,6 +265,20 @@ about this** on an item. The model can list the threads, search everything,
 and read any item with what it's linked to, so it can answer questions like
 "what's the status of ABC-101 and what did people say about the fix?"
 
+**At scale.** The page stays quick with thousands of items. It was tested
+with 1000 pull requests, 1000 Jira issues, 1000 emails and 500 notes:
+
+- A sync of all of that took under a second against a test server.
+- Tree and Columns show 40 threads at a time; **Show more** adds 40 more,
+  and the filter box finds everything.
+- The Graph runs at 60 fps once laid out.
+- A long item's text arrives in full when you open it.
+
+Sync pages through GitHub and Jira. It reads up to 1000 pull requests per
+repository (set "Pull requests per repository") and up to 1000 Jira
+issues, fetching mentioned issues 50 at a time. With a lot of context, the
+model gets a short overview and reads the details it needs.
+
 Everything is **read-only**: nothing is changed in GitHub or Jira, and email
 isn't marked as read. Each sync is saved in the app's data folder
 (`context.json`), so the diagram works offline, and the model reads that

@@ -6,7 +6,8 @@ window.VAContext = function (app) {
   const { api, toast, guard, openModal, closeModal, $, $$ } = app;
   const esc = v => app.esc(v == null ? "" : String(v));
   const C = { graph: null, sources: [], syncing: false, filter: "", loose: false, sel: "", loaded: false,
-    mode: "tree", collapsed: new Set(), shut: new Set(), roots: {}, seen: new Set(), parentOf: {} };
+    mode: "tree", collapsed: new Set(), shut: new Set(), roots: {}, seen: new Set(), parentOf: {}, limit: 40 };
+  const PAGE = 40;     // threads drawn at a time in Tree and Columns; "Show more" adds another page
   try { C.mode = localStorage.getItem("va-ctx-mode") || "tree"; } catch (_) { /* private window */ }
   const KINDS = [["jira", "Jira"], ["pr", "Pull requests"], ["mail", "Email"], ["note", "Notes"]];
   const LABEL = { jira: "Jira issue", pr: "Pull request", mail: "Email", note: "Note" };
@@ -35,18 +36,31 @@ window.VAContext = function (app) {
   }
 
   // ── drawing ───────────────────────────────────────────────────────────
+  // formatting dates is slow in bulk, so the formatters are made once and each date is formatted once
+  const FMT = { time: new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" }), day: new Intl.DateTimeFormat([], { month: "short", day: "numeric" }),
+    full: new Intl.DateTimeFormat() };
+  const whenCache = new Map();
   const when = s => {
     if (!s) return "";
+    let out = whenCache.get(s);
+    if (out !== undefined) return out;
     const d = new Date(s);
-    if (isNaN(d)) return s.slice(0, 10);
-    const days = (Date.now() - d) / 864e5;
-    return days < 1 ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : days < 300 ? d.toLocaleDateString([], { month: "short", day: "numeric" }) : d.toLocaleDateString();
+    if (isNaN(d)) out = s.slice(0, 10);
+    else {
+      const days = (Date.now() - d) / 864e5;
+      out = days < 1 ? FMT.time.format(d) : days < 300 ? FMT.day.format(d) : FMT.full.format(d);
+    }
+    whenCache.set(s, out);
+    return out;
   };
+
   function hay(n) {
-    return [n.id, n.title, n.who, n.state, n.text].concat(Object.values(n.fields || {})).join(" ").toLowerCase();
+    if (n._hay === undefined) n._hay = [n.id, n.title, n.who, n.state, n.text].concat(Object.values(n.fields || {})).join(" ").toLowerCase();
+    return n._hay;
   }
+  let words = [], wordsFor = null;
   function matches(n) {
-    const words = C.filter.toLowerCase().split(/\s+/).filter(Boolean);
+    if (wordsFor !== C.filter) { wordsFor = C.filter; words = C.filter.toLowerCase().split(/\s+/).filter(Boolean); }
     if (!words.length) return true;
     const h = hay(n);
     return words.every(w => h.includes(w));
@@ -122,9 +136,11 @@ window.VAContext = function (app) {
       renderDetail();
       return;
     }
+    const more = threads.length > C.limit ? '<div class="ctx-more"><button class="btn" data-a="more">Show ' + Math.min(PAGE, threads.length - C.limit) + " more threads</button>" +
+      '<span class="faint small">' + C.limit + " of " + threads.length + " shown" + (C.filter ? "" : " · the filter box finds the rest") + "</span></div>" : "";
     if (C.mode === "tree") {
       const loose2 = g.loose.filter(i => (C.loose || C.byId[i].kind === "note") && matches(C.byId[i]));
-      board.innerHTML = threads.map(treeHTML).join("") +
+      board.innerHTML = threads.slice(0, C.limit).map(treeHTML).join("") + more +
         (loose2.length ? '<section class="tthread"><div class="tt-head"><span class="tt-title">' + (C.loose ? "Not linked to anything" : "Your notes that aren't linked yet") +
           '</span></div><ul class="ttree flat">' + loose2.map(i => "<li>" + rowHTML(i, null, 0, []) + "</li>").join("") + "</ul></section>" : "") +
         (!threads.length && !loose2.length ? '<p class="faint small pad">' + (C.filter ? "Nothing matches." : hidden ? "No linked items. Tick <b>Unlinked</b> to see the " + hidden + " items that don't mention each other." : "") + "</p>" : "") +
@@ -134,7 +150,7 @@ window.VAContext = function (app) {
       return;
     }
     board.innerHTML = '<div class="cb-head">' + C.kinds.map(([, l]) => "<span>" + l + "</span>").join("") + "</div>" +
-      threads.map(t => band(t, threadTitle(t))).join("") +
+      threads.slice(0, C.limit).map(t => band(t, threadTitle(t))).join("") + more +
       (loose.length ? band(loose, C.loose ? "Not linked to anything" : "Your notes that aren't linked yet") : "") +
       (!threads.length && !loose.length ? '<p class="faint small pad">' + (C.filter ? "Nothing matches." : hidden ? "No linked items. Tick <b>Unlinked</b> to see the " + hidden + " items that don't mention each other." : "") + "</p>" : "") +
       (!C.loose && hidden && (threads.length || loose.length) ? '<p class="faint tiny pad">' + hidden + " item" + (hidden === 1 ? " isn't" : "s aren't") + " linked to anything; tick <b>Unlinked</b> to show them.</p>" : "");
@@ -208,7 +224,7 @@ window.VAContext = function (app) {
     const words = { jira: ["issue", "issues"], pr: ["pull request", "pull requests"], mail: ["email", "emails"], note: ["note", "notes"] };
     const shut = C.shut.has(key) && !C.filter;
     return '<section class="tthread' + (shut ? " shut" : "") + '"><div class="tt-head"><button class="twisty" data-shut="' + esc(key) + '">' + icon(shut ? "chevron-right" : "chevron-down") + "</button>" +
-      '<span class="tt-title">' + esc(threadTitle(ids)) + '</span><span class="faint tiny">' +
+      '<span class="tt-title">' + esc(threadTitle([t.root])) + '</span><span class="faint tiny">' +
       KINDS.filter(([k]) => counts[k]).map(([k]) => counts[k] + " " + words[k][counts[k] === 1 ? 0 : 1]).join(" · ") + "</span>" +
       '<span class="tt-acts">' + (C.roots[key] ? '<button class="linkish" data-unroot="' + esc(key) + '">Back to the main item</button>' : "") + '<button class="linkish" data-all="open" data-key="' + esc(key) + '">Unfold all</button><button class="linkish" data-all="fold" data-key="' + esc(key) + '">Fold all</button></span></div>' +
       (shut ? "" : '<ul class="ttree root">' + node(t.root, 0) + "</ul>") + "</section>";
@@ -216,12 +232,16 @@ window.VAContext = function (app) {
   function threadOf(id) { return C.graph.threads.find(t => t.includes(id)); }
   function reveal(id) {     // unfold everything above an item so it can be seen
     const t = threadOf(id);
-    if (t) C.shut.delete(threadKey(t));
+    if (t) {
+      C.shut.delete(threadKey(t));
+      const at = C.graph.threads.filter(x => x.some(i => matches(C.byId[i]))).indexOf(t);
+      if (at >= C.limit) C.limit = at + 1;     // a thread past "Show more"
+    }
     for (let p = C.parentOf[id]; p; p = C.parentOf[p]) C.collapsed.delete(p);
   }
 
   // ── the graph: every item a dot, every link a line, laid out by a small force simulation ──
-  const KCOL = { jira: "#4c9aff", pr: "#6cc28a", mail: "#d7b45a", note: "#b48ee8" };
+  const KCOL = { jira: "", pr: "", mail: "", note: "" };     // read from the theme (--k-jira…) when the graph draws
   const GV = { nodes: [], links: [], at: {}, pos: {}, cam: { x: 0, y: 0, k: 1 }, alpha: 0, raf: 0, hover: "", drag: null, pan: null, fitted: false, colors: null };
   function renderGraph(ids) {
     const board = $("#ctxBoard");
@@ -229,12 +249,13 @@ window.VAContext = function (app) {
       board.innerHTML = '<div class="gv"><canvas id="ctxCanvas" tabindex="0" aria-label="Graph of linked items"></canvas>' +
         '<div class="gv-tools"><button class="icon-btn" data-gv="in" title="Zoom in">' + icon("plus") + '</button><button class="icon-btn" data-gv="out" title="Zoom out">' +
         '<svg class="i" viewBox="0 0 16 16"><path d="M3 8h10"/></svg></button><button class="icon-btn" data-gv="fit" title="Fit everything">' + icon("refresh") + "</button></div>" +
-        '<div class="gv-legend">' + KINDS.map(([k, l]) => '<span><i style="background:' + KCOL[k] + '"></i>' + l + "</span>").join("") +
+        '<div class="gv-legend">' + KINDS.map(([k, l]) => '<span><i style="background:var(--k-' + k + ')"></i>' + l + "</span>").join("") +
         '<span class="faint">Drag to move · scroll to zoom · click for details</span></div></div>';
       wireGraph(board.querySelector("canvas"));
       GV.fitted = false;
     }
     const css = getComputedStyle(document.documentElement);
+    Object.keys(KCOL).forEach(k => (KCOL[k] = css.getPropertyValue("--k-" + k).trim() || "#888"));
     GV.colors = { line: css.getPropertyValue("--line-2").trim() || "#444", text: css.getPropertyValue("--text").trim() || "#ddd",
       faint: css.getPropertyValue("--faint").trim() || "#777", accent: css.getPropertyValue("--accent").trim() || "#d97757", bg: css.getPropertyValue("--panel-2").trim() || "#222" };
     const set = new Set(ids), fresh = [];
@@ -268,23 +289,61 @@ window.VAContext = function (app) {
     graphResize();
     if (fresh.length) {
       GV.alpha = 1;
-      for (let t = 0; t < (GV.nodes.length > 400 ? 80 : 260); t++) graphTick();   // settle before the first frame
+      const until = performance.now() + 450;          // settle before the first frame, for at most about half a second
+      for (let t = 0; t < 300 && performance.now() < until; t++) graphTick();
     }
     if (!GV.fitted) { graphFit(); GV.fitted = true; GV.touched = false; }
     GV.alpha = Math.max(GV.alpha, fresh.length ? 0.3 : 0.05);
     graphRun();
   }
+  // Barnes-Hut: distant groups of dots push as one, so a tick costs n·log n instead of n² (3000+ items stay smooth)
+  function bhBuild(ns) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    ns.forEach(p => { if (p.x < x0) x0 = p.x; if (p.y < y0) y0 = p.y; if (p.x > x1) x1 = p.x; if (p.y > y1) y1 = p.y; });
+    const root = { x: x0, y: y0, s: Math.max(x1 - x0, y1 - y0) + 1, m: 0, sx: 0, sy: 0, p: null, kids: null, more: null };
+    const insert = (c, p, depth) => {
+      c.m++; c.sx += p.x; c.sy += p.y;
+      if (!c.kids) {
+        if (!c.p) { c.p = p; return; }
+        if (depth > 24) { (c.more = c.more || []).push(p); return; }   // dots on the same spot
+        const q = c.p;
+        c.p = null; c.kids = [null, null, null, null];
+        place(c, q, depth);
+      }
+      place(c, p, depth);
+    };
+    const place = (c, p, depth) => {
+      const h = c.s / 2, right = p.x >= c.x + h, down = p.y >= c.y + h, k = (right ? 1 : 0) + (down ? 2 : 0);
+      if (!c.kids[k]) c.kids[k] = { x: c.x + (right ? h : 0), y: c.y + (down ? h : 0), s: h, m: 0, sx: 0, sy: 0, p: null, kids: null, more: null };
+      insert(c.kids[k], p, depth + 1);
+    };
+    ns.forEach(p => insert(root, p, 0));
+    return root;
+  }
+  const push = (p, dx, dy, d2, m, al) => {      // dx, dy: from p to the other dot(s)
+    if (d2 > 640000) return;
+    if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
+    const d = Math.sqrt(d2), f = -(1400 / d2 + 3 / d) * al * m;
+    p.vx += dx / d * f; p.vy += dy / d * f;
+  };
   function graphTick() {
     const ns = GV.nodes, n = ns.length, al = GV.alpha;
-    for (let i = 0; i < n; i++) {               // every pair pushes apart
+    if (!n) return;
+    const root = bhBuild(ns), stack = [];
+    for (let i = 0; i < n; i++) {               // every dot is pushed away from the others
       const p = ns[i];
-      for (let j = i + 1; j < n; j++) {
-        const q = ns[j];
-        let dx = q.x - p.x, dy = q.y - p.y, d2 = dx * dx + dy * dy;
-        if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
-        if (d2 > 640000) continue;
-        const d = Math.sqrt(d2), f = -(1400 / d2 + 3 / d) * al;
-        p.vx += dx / d * f; p.vy += dy / d * f; q.vx -= dx / d * f; q.vy -= dy / d * f;
+      stack.length = 0; stack.push(root);
+      while (stack.length) {
+        const c = stack.pop();
+        if (!c.m) continue;
+        if (!c.kids) {
+          if (c.p && c.p !== p) push(p, c.p.x - p.x, c.p.y - p.y, (c.p.x - p.x) ** 2 + (c.p.y - p.y) ** 2, 1, al);
+          if (c.more) c.more.forEach(q => { if (q !== p) push(p, q.x - p.x, q.y - p.y, (q.x - p.x) ** 2 + (q.y - p.y) ** 2, 1, al); });
+          continue;
+        }
+        const cx = c.sx / c.m, cy = c.sy / c.m, dx = cx - p.x, dy = cy - p.y, d2 = dx * dx + dy * dy;
+        if (c.s * c.s < 0.64 * d2) push(p, dx, dy, d2, c.m, al);     // far enough: the whole cell as one
+        else for (const k of c.kids) if (k) stack.push(k);
       }
     }
     GV.links.forEach(l => {                     // links pull together, like springs
@@ -292,23 +351,31 @@ window.VAContext = function (app) {
       const want = 80 + 8 * Math.min(l.a.deg, l.b.deg), f = (d - want) / d * 0.1 * al;
       l.a.vx += dx * f; l.a.vy += dy * f; l.b.vx -= dx * f; l.b.vy -= dy * f;
     });
-    ns.forEach(p => {                           // a gentle pull to the middle keeps clusters and loose dots close
+    ns.forEach(p => {                           // a pull towards its thread's spot keeps each thread an island
       const g = (p.deg ? 0.007 : 0.03) * al;
       p.vx -= (p.x - (p.ax || 0)) * g; p.vy -= (p.y - (p.ay || 0)) * g;
       if (p.fixed) { p.vx = p.vy = 0; return; }
       p.vx *= 0.6; p.vy *= 0.6;
       p.x += p.vx; p.y += p.vy;
     });
-    for (let i = 0; i < n; i++) {               // and never closer than their size plus room for a name
-      const p = ns[i], rp = radius(p);
-      for (let j = i + 1; j < n; j++) {
-        const q = ns[j], dx = q.x - p.x, dy = q.y - p.y, min = rp + radius(q) + 26, d2 = dx * dx + dy * dy;
-        if (d2 >= min * min || d2 === 0) continue;
-        const d = Math.sqrt(d2), push = (min - d) / d * 0.5;
-        if (!p.fixed) { p.x -= dx * push; p.y -= dy * push; }
-        if (!q.fixed) { q.x += dx * push; q.y += dy * push; }
+    // and never closer than their size plus room for a name (checked through a grid, not every pair)
+    const cell = 64, grid = new Map();
+    ns.forEach(p => { const key = Math.floor(p.x / cell) + "," + Math.floor(p.y / cell); let b = grid.get(key); if (!b) grid.set(key, (b = [])); b.push(p); });
+    ns.forEach(p => {
+      const gx = Math.floor(p.x / cell), gy = Math.floor(p.y / cell), rp = radius(p);
+      for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+        const b = grid.get((gx + ox) + "," + (gy + oy));
+        if (!b) continue;
+        for (const q of b) {
+          if (q === p || q.id < p.id) continue;
+          const dx = q.x - p.x, dy = q.y - p.y, min = Math.min(cell - 2, rp + radius(q) + 26), d2 = dx * dx + dy * dy;
+          if (d2 >= min * min || d2 === 0) continue;
+          const d = Math.sqrt(d2), k = (min - d) / d * 0.5;
+          if (!p.fixed) { p.x -= dx * k; p.y -= dy * k; }
+          if (!q.fixed) { q.x += dx * k; q.y += dy * k; }
+        }
       }
-    }
+    });
     GV.alpha *= 0.985;
   }
   function graphRun() {
@@ -360,7 +427,7 @@ window.VAContext = function (app) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, GV.w, GV.h);
     // what to light up: the hovered (or selected) item and its neighbours, like Obsidian's graph
-    const focus = GV.hover || C.sel;
+    const focus = GV.hover || (C.filter ? "" : C.sel);    // while filtering, the matches stand out (hover still shows links)
     const near = focus ? new Set([focus].concat(Array.from(adj[focus] || []))) : null;
     const filtering = !!C.filter;
     GV.links.forEach(l => {
@@ -383,7 +450,7 @@ window.VAContext = function (app) {
       ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2); ctx.fill();
       if (n.id === C.sel || n.id === GV.hover) { ctx.lineWidth = 2.5; ctx.strokeStyle = c.text; ctx.beginPath(); ctx.arc(s.x, s.y, r + 3, 0, Math.PI * 2); ctx.stroke(); }
       // names fade in as you zoom; hubs, the focus and its neighbours always get one
-      const show = (near && near.has(n.id)) || (!near && (k > 1.15 || n.deg >= 4 || (filtering && n.hit)));
+      const show = (near && near.has(n.id)) || (!near && (filtering ? n.hit : k > 1.15 || n.deg >= 4));
       if (show) labels.push([n, s, r, lit]);
     });
     ctx.font = "12px " + (getComputedStyle(document.body).fontFamily || "sans-serif");
@@ -391,11 +458,21 @@ window.VAContext = function (app) {
     // most important names first (the focus and its neighbours, then hubs); a name that would overlap one already drawn is skipped
     const rank = n => (n.id === focus ? 1e6 : 0) + (near && near.has(n.id) ? 1e5 : 0) + n.deg * 10 + (n.hit && filtering ? 1e4 : 0);
     labels.sort((x, y) => rank(y[0]) - rank(x[0]));
-    const placed = GV.nodes.filter(n => !near || near.has(n.id)).map(n => { const q = toScreen(n), r = radius(n) * Math.max(0.6, Math.min(1.6, k)); return [q.x - r, q.y - r, q.x + r, q.y + r]; });
+    labels.length = Math.min(labels.length, 400);   // more names than this can't be read anyway
+    // what names must not cover: the dots on screen, and names already placed (kept in a coarse grid)
+    const G = 48, taken = new Map();
+    const cellsOf = b => { const out = []; for (let x = Math.floor(b[0] / G); x <= Math.floor(b[2] / G); x++) for (let y = Math.floor(b[1] / G); y <= Math.floor(b[3] / G); y++) out.push(x + "," + y); return out; };
+    const put = b => cellsOf(b).forEach(key => { let l = taken.get(key); if (!l) taken.set(key, (l = [])); l.push(b); });
+    const hits = b => cellsOf(b).some(key => (taken.get(key) || []).some(o => b[0] < o[2] && b[2] > o[0] && b[1] < o[3] && b[3] > o[1]));
+    if (labels.length) GV.nodes.forEach(n => {
+      if (near && !near.has(n.id)) return;
+      const q = toScreen(n), r = radius(n) * Math.max(0.6, Math.min(1.6, k));
+      if (q.x > -20 && q.y > -20 && q.x < GV.w + 20 && q.y < GV.h + 20) put([q.x - r, q.y - r, q.x + r, q.y + r]);
+    });
     labels.forEach(([n, s, r, lit]) => {
       const t = label(n), w = ctx.measureText(t).width, box = [s.x - w / 2 - 2, s.y + r + 3, s.x + w / 2 + 2, s.y + r + 18];
-      if (n.id !== focus && placed.some(b => box[0] < b[2] && box[2] > b[0] && box[1] < b[3] && box[3] > b[1])) return;
-      placed.push(box);
+      if (n.id !== focus && hits(box)) return;
+      put(box);
       ctx.globalAlpha = lit ? 1 : 0.3;
       ctx.lineWidth = 3; ctx.strokeStyle = c.bg; ctx.strokeText(t, s.x, s.y + r + 14);
       ctx.fillStyle = n.id === focus ? c.text : c.faint;
@@ -525,6 +602,7 @@ window.VAContext = function (app) {
     box.hidden = !n;
     $("#view-context").classList.toggle("has-detail", !!n);
     if (!n) return;
+    if (n.more) fullText(n.id);
     const kind = LABEL[n.kind];
     const fields = Object.entries(n.fields || {}).filter(([, v]) => v);
     const linked = Array.from(adj[n.id] || []).map(i => C.byId[i]).filter(Boolean);
@@ -540,16 +618,31 @@ window.VAContext = function (app) {
       (C.mode === "tree" && linked.length ? '<button class="btn small" data-a="reroot" title="Redraw this thread\'s tree starting from this item">Start the tree here</button>' : "") +
       (n.kind === "note" ? '<button class="btn small" data-a="edit">' + icon("edit") + 'Edit</button><button class="icon-btn" data-a="delete" title="Delete this note">' + icon("trash") + "</button>"
         : '<button class="btn small" data-a="addnote" title="Add a note linked to this item">' + icon("plus") + "Note</button>") + "</div>" +
-      '<div class="cd-text">' + esc(n.text || "(no description)") + "</div>" +
+      '<div class="cd-text" id="cdText">' + esc(n.text || "(no description)") + "</div>" +
       (linked.length ? '<h4>Linked (' + linked.length + ")</h4>" + linked.map(m => '<div class="cd-linkrow"><button class="cd-link" data-id="' + esc(m.id) + '"><span class="tag k-' + esc(m.kind) + '">' +
         esc(SHORT[m.kind]) + "</span><span>" + esc(m.kind === "mail" || m.kind === "note" ? m.title : m.id + " · " + m.title) + "</span></button>" +
         (isManual(n.id, m.id) ? '<button class="icon-btn" data-unlink="' + esc(m.id) + '" title="Remove this link (you added it)">' + icon("close") + "</button>" : "") + "</div>").join("")
         : '<p class="faint small">Not linked to anything else. Use <b>Link to…</b> to connect it by hand.</p>');
   }
+  // the page gets a short preview of long texts; the detail panel fills in the rest
+  async function fullText(id) {
+    const n = C.byId[id];
+    if (!n || !n.more) return;
+    try {
+      const it = (await api("GET", "context?item=" + encodeURIComponent(id))).item;
+      Object.assign(n, { text: it.text, more: false, _hay: undefined });
+      const el = $("#cdText");
+      if (el && C.sel === id) el.textContent = it.text || "(no description)";
+    } catch (_) { /* keep the preview */ }
+  }
   function select(id, keep) {
     C.sel = C.sel === id && !keep ? "" : id;
     if (C.mode === "graph") { if (C.sel) graphFocus(C.sel); graphDraw(); renderDetail(); return; }
-    if (C.sel && C.mode === "tree" && !$('#ctxBoard .ccard[data-id="' + CSS.escape(C.sel) + '"]')) { reveal(C.sel); render(); }
+    const shown = () => $('#ctxBoard .ccard[data-id="' + CSS.escape(C.sel) + '"]');
+    if (C.sel && C.mode !== "graph" && !shown()) {
+      reveal(C.sel); render();
+      if (!shown()) { reveal(C.sel); render(); }   // the tree's parents are known once its thread is drawn
+    }
     $$("#ctxBoard .ccard").forEach(el => el.classList.toggle("sel", el.dataset.id === C.sel));
     highlight(C.sel, !!C.sel);
     renderDetail();
@@ -670,6 +763,7 @@ window.VAContext = function (app) {
       if (c) return select(c.dataset.id);
       if (e.target.closest('[data-a="settings"]')) { app.showView("settings"); const p = $("#ctxSettings"); if (p) p.scrollIntoView(); }
       if (e.target.closest('[data-a="addnote"]')) guard(() => noteDialog(null, ""))();
+      if (e.target.closest('[data-a="more"]')) { C.limit += PAGE; render(); }
     });
     board.addEventListener("keydown", e => { const c = e.target.closest(".ccard"); if (c && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); select(c.dataset.id); } });
     board.addEventListener("mouseover", e => { const c = e.target.closest(".ccard"); if (c) highlight(c.dataset.id, true); });
@@ -698,7 +792,7 @@ window.VAContext = function (app) {
     $("#ctxAdd").onclick = guard(() => noteDialog(null, ""));   // the + Note button on a selected item pre-links it
     $("#ctxLoose").onchange = e => { C.loose = e.target.checked; render(); };
     let t = null;
-    $("#ctxFilter").oninput = e => { clearTimeout(t); t = setTimeout(() => { C.filter = e.target.value.trim(); render(); }, 120); };
+    $("#ctxFilter").oninput = e => { clearTimeout(t); t = setTimeout(() => { C.filter = e.target.value.trim(); C.limit = PAGE; render(); }, 150); };
     $("#ctxStatus").addEventListener("click", e => {
       if (!e.target.closest("#ctxErrs")) return;
       const d = openModal("<h3>Problems in the last sync</h3><ul>" + C.graph.errors.map(x => "<li>" + esc(x) + "</li>").join("") + "</ul>" +

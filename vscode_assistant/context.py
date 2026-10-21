@@ -122,20 +122,29 @@ def fetch_github(cfg):
             "User-Agent": "VSCodeAssistant"}
     if cfg.get("gh_token"):
         hdrs["Authorization"] = "Bearer " + cfg["gh_token"].strip()
-    limit = max(1, min(int(cfg.get("gh_limit") or 30), 100))
+    limit = max(1, min(int(cfg.get("gh_limit") or 30), 1000))
     nodes, errors = [], []
     for repo in _lines(cfg.get("gh_repos")):
         repo = repo.strip("/")
         if repo.count("/") != 1:
             errors.append("GitHub: %r should look like owner/repo." % repo)
             continue
-        url = "%s/repos/%s/pulls?state=all&sort=updated&direction=desc&per_page=%d" % (api, repo, limit)
+        prs, page = [], 1
         try:
-            prs = net.get_json(url, headers=hdrs)
+            while len(prs) < limit:       # 100 a page, newest first, until the limit or the last page
+                per = min(100, limit - len(prs)) if page == 1 else 100
+                url = "%s/repos/%s/pulls?state=all&sort=updated&direction=desc&per_page=%d&page=%d" % (api, repo, per, page)
+                got = net.get_json(url, headers=hdrs)
+                got = got if isinstance(got, list) else []
+                prs += got[:limit - len(prs)]
+                if len(got) < per:
+                    break
+                page += 1
         except Exception as e:
             errors.append("GitHub %s: %s" % (repo, e))
-            continue
-        for p in prs if isinstance(prs, list) else []:
+            if not prs:
+                continue
+        for p in prs:
             state = "merged" if p.get("merged_at") else ("draft" if p.get("draft") and p.get("state") == "open"
                                                          else p.get("state", ""))
             nodes.append({
@@ -217,44 +226,95 @@ def _jira_time(s):
         return s
 
 
+JIRA_MAX = 1000     # issues per sync, from the JQL query and from keys found in PRs, email and notes
+
+
+def _jira_search(base, ver, hdrs, jql, limit):
+    """Every issue a JQL query matches (up to limit), following the pages."""
+    out, token, start = [], "", 0
+    while len(out) < limit:
+        q = {"jql": jql, "fields": FIELDS, "maxResults": min(100, limit - len(out))}
+        if ver == "3":   # Cloud retired /search in 2025 in favour of /search/jql, which pages with a token
+            if token:
+                q["nextPageToken"] = token
+            d = net.get_json("%s/rest/api/3/search/jql?%s" % (base, urllib.parse.urlencode(q)), headers=hdrs)
+        else:
+            q["startAt"] = start
+            d = net.get_json("%s/rest/api/2/search?%s" % (base, urllib.parse.urlencode(q)), headers=hdrs)
+        got = d.get("issues") or []
+        out += got
+        if ver == "3":
+            token = d.get("nextPageToken") or ""
+            if not token or d.get("isLast") or not got:
+                break
+        else:
+            start += len(got)
+            if not got or start >= int(d.get("total") or 0):
+                break
+    return out
+
+
 def fetch_jira(cfg, keys):
     base, ver, hdrs = _jira_client(cfg)
     if not base:
         return [], []
     nodes, errors, seen = [], [], set()
+
+    def add(issue):
+        if issue.get("key") and issue["key"] not in seen:
+            seen.add(issue["key"])
+            nodes.append(_jira_node(base, issue))
     jql = (cfg.get("jira_jql") or "").strip()
     if jql:
-        if ver == "3":  # Cloud retired /search in 2025 in favour of /search/jql
-            url = "%s/rest/api/3/search/jql?%s" % (base, urllib.parse.urlencode(
-                {"jql": jql, "fields": FIELDS, "maxResults": 50}))
-        else:
-            url = "%s/rest/api/2/search?%s" % (base, urllib.parse.urlencode(
-                {"jql": jql, "fields": FIELDS, "maxResults": 50}))
         try:
-            for issue in net.get_json(url, headers=hdrs).get("issues") or []:
-                nodes.append(_jira_node(base, issue))
-                seen.add(issue["key"])
+            for issue in _jira_search(base, ver, hdrs, jql, JIRA_MAX):
+                add(issue)
         except Exception as e:
             errors.append("Jira search: %s" % e)
-    failures, missing = 0, 0
-    wanted = sorted(keys - seen)[:80]
-    for key in wanted:
-        url = "%s/rest/api/%s/issue/%s?fields=%s" % (base, ver, key, FIELDS)
+    wanted = sorted(keys - seen)[:max(0, JIRA_MAX - len(nodes))]
+    missing, failures, singles = 0, 0, 0
+    # keys found in PRs and email: 50 at a time in one search. Jira rejects the whole query if one key doesn't
+    # exist, and can leave out issues you can't see, so whatever a batch doesn't return is asked for one by one
+    # (at most 100 of those per sync).
+    for i in range(0, len(wanted), 50):
+        batch = wanted[i:i + 50]
         try:
-            nodes.append(_jira_node(base, net.get_json(url, headers=hdrs)))
+            for issue in _jira_search(base, ver, hdrs, "key in (%s)" % ", ".join(batch), len(batch)):
+                add(issue)
         except net.HTTPError as e:
             if e.status in (401, 403):
                 errors.append("Jira: %s (check the email and API token)." % e)
                 break
-            missing += 1    # 404: a key-shaped string that isn't one of your issues
         except Exception as e:
             failures += 1
             if failures >= 3:
                 errors.append("Jira: %s" % e)
                 break
+            continue
+        for key in batch:
+            if key in seen:
+                continue
+            if singles >= 100:
+                missing += 1
+                continue
+            singles += 1
+            try:
+                add(net.get_json("%s/rest/api/%s/issue/%s?fields=%s" % (base, ver, key, FIELDS), headers=hdrs))
+            except net.HTTPError as e:
+                if e.status in (401, 403):
+                    errors.append("Jira: %s (check the email and API token)." % e)
+                    return nodes, errors
+                missing += 1    # 404: a key-shaped string that isn't one of your issues
+            except Exception as e:
+                failures += 1
+                if failures >= 3:
+                    errors.append("Jira: %s" % e)
+                    return nodes, errors
     if wanted and missing == len(wanted) and not nodes:
         errors.append("Jira: none of the %d issue keys found in pull requests and email (%s…) exist on %s. Check the "
                       "site URL, and leave the email empty only for Jira Server / Data Center." % (len(wanted), ", ".join(wanted[:3]), base))
+    if len(keys | seen) > JIRA_MAX:
+        errors.append("Jira: only the first %d issues were loaded." % JIRA_MAX)
     return nodes, errors
 
 
@@ -560,9 +620,15 @@ class Graph:
         except (OSError, ValueError, KeyError, TypeError):
             return cls()
 
+    PAGE_TEXT = 600
+
     def for_page(self):
-        """What the Context page draws: every item, the links, and the threads (lists of ids)."""
-        return dict(self.to_json(), threads=self.threads(), manual=[list(e) for e in sorted(self.manual)],
+        """What the Context page draws: every item (text cut to a preview; the detail panel asks for the rest),
+        the links, and the threads (lists of ids)."""
+        cut = self.PAGE_TEXT
+        nodes = [dict(n, text=n["text"][:cut].rstrip() + "…", more=True) if len(n.get("text") or "") > cut else n
+                 for n in self.nodes.values()]
+        return dict(self.to_json(), nodes=nodes, threads=self.threads(), manual=[list(e) for e in sorted(self.manual)],
                     loose=sorted((i for i in self.nodes if not self.adj[i]),
                                  key=lambda i: self.nodes[i].get("updated") or "", reverse=True))
 
@@ -623,17 +689,32 @@ class Graph:
             ", plus %d note%s the user added" % (counts["note"], "" if counts["note"] == 1 else "s")
             if counts["note"] else ""), ""]
         threads = self.threads()
-        for t_i, group in enumerate(threads[:25], 1):
-            out.append("Thread %d:" % t_i)
-            out += ["  - " + self.line(i) for i in group[:12]]
-            if len(group) > 12:
-                out.append("  … and %d more" % (len(group) - 12))
-        if len(threads) > 25:
-            out.append("… and %d more threads (use context_search)." % (len(threads) - 25))
+        recent = lambda ids: sorted(ids, key=lambda i: self.nodes[i].get("updated") or "", reverse=True)
+        # with a lot of context, one line per thread plus its main item and newest few, so it fits a small model
+        big = len(self.nodes) > 150
+        per, shown_threads = (4, 20) if big else (12, 25)
+        for t_i, group in enumerate(threads[:shown_threads], 1):
+            if big:
+                kinds = {k: sum(1 for i in group if self.nodes[i]["kind"] == k) for k, _l in KINDS}
+                main = max(group, key=lambda i: (self.nodes[i]["kind"] == "jira", len(self.adj[i])))
+                names = {"jira": "issues", "pr": "PRs", "mail": "emails", "note": "notes"}
+                out.append("Thread %d (%d items: %s), main item %s:" % (t_i, len(group), ", ".join(
+                    "%d %s" % (v, names[k]) for k, v in kinds.items() if v), main))
+                picks = [main] + [i for i in recent(group) if i != main][:per - 1]
+            else:
+                out.append("Thread %d:" % t_i)
+                picks = group[:per]
+            out += ["  - " + self.line(i) for i in picks]
+            if len(group) > len(picks):
+                out.append("  … and %d more (context_item %s lists its links)" % (len(group) - len(picks), picks[0]))
+        if len(threads) > shown_threads:
+            out.append("… and %d more threads (use context_search)." % (len(threads) - shown_threads))
         loose = [i for i in self.nodes if not self.adj[i] and self.nodes[i]["kind"] != "mail"]
         if loose:
-            loose.sort(key=lambda i: self.nodes[i].get("updated") or "", reverse=True)
-            out += ["", "Not linked to anything (most recent):"] + ["  - " + self.line(i) for i in loose[:15]]
+            loose = recent(loose)
+            out += ["", "Not linked to anything (most recent):"] + ["  - " + self.line(i) for i in loose[:8 if big else 15]]
+            if len(loose) > (8 if big else 15):
+                out.append("  (+ %d more; find them with context_search)" % (len(loose) - (8 if big else 15)))
         unlinked_mail = sum(1 for i in self.nodes if not self.adj[i] and self.nodes[i]["kind"] == "mail")
         if unlinked_mail:
             out.append("  (+ %d emails that don't mention a PR or issue; find them with context_search)" % unlinked_mail)
@@ -671,18 +752,24 @@ class Graph:
         out += ["", n.get("text") or "(no description)"]
         if self.adj[i]:
             out += ["", "Linked items:"]
-            for j in sorted(self.adj[i]):
+            near = sorted(self.adj[i], key=lambda k: self.nodes[k].get("updated") or "", reverse=True)
+            for j in near[:20]:
                 m = self.nodes[j]
                 snippet = " ".join((m.get("text") or "").split())[:300]
                 out.append("- " + self.line(j) + ("\n    " + snippet if snippet else ""))
-            # the rest of the thread (linked through those), so one call answers "what did people say about the fix?"
-            group = next((g for g in self.threads() if i in g), [])
-            rest = [j for j in group if j != i and j not in self.adj[i]]
+            if len(near) > 20:
+                out.append("… and %d more linked items." % (len(near) - 20))
+            # one step further (linked through those), newest first, so one call answers "what did people say about
+            # the fix?" even when the email only mentions the PR
+            rest = {k for j in self.adj[i] for k in self.adj[j]} - self.adj[i] - {i}
+            rest = sorted(rest, key=lambda k: self.nodes[k].get("updated") or "", reverse=True)
             if rest:
-                out += ["", "Also in this thread (linked through the items above):"]
+                out += ["", "Linked through the items above (newest first):"]
                 for j in rest[:10]:
                     snippet = " ".join((self.nodes[j].get("text") or "").split())[:200]
                     out.append("- " + self.line(j) + ("\n    " + snippet if snippet else ""))
+                if len(rest) > 10:
+                    out.append("… and %d more; read one of the linked items above to see its links." % (len(rest) - 10))
         return "\n".join(out)
 
     def run(self, name, args):
