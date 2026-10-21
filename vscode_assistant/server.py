@@ -30,7 +30,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import agent_browser, api, apirun, engine, gitops, net, projects, providers, realtime, tasks, web
+from . import agent_browser, api, apirun, engine, gitops, javadebug, javals, net, projects, providers, realtime, tasks, web
 from .library import KINDS, Library
 from .store import Store, new_id
 
@@ -60,6 +60,8 @@ class Hub:
         self.script_calls = {}       # script run id -> {"event", "result"} (scripts run in the app window's sandbox)
         self.api_reports = {}        # collection run reports, for downloading
         self.rt = realtime.Sessions(self.publish)   # open WebSocket / SSE connections
+        self.java = javals.Java(self.store.dir, self.store.settings.setdefault("java", {}), self.publish)   # Java language servers
+        self.debug = {}             # project id -> javadebug.Session
         self.oauth_pending = {}      # OAuth state -> {"auth", "vals", "verifier", "redirect"}
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
@@ -626,6 +628,13 @@ class Handler(BaseHTTPRequestHandler):
                 a["chrome_path"] = str(b["agent"]["chrome_path"]).strip().strip('"')
             if "max_steps" in b["agent"]:
                 a["max_steps"] = max(5, min(int(b["agent"]["max_steps"]), 60))
+        if isinstance(b.get("java"), dict):
+            j = s.setdefault("java", {})
+            if "java_home" in b["java"]:
+                j["java_home"] = str(b["java"]["java_home"]).strip().strip('"')
+                h.java.tools.javas(refresh=True)
+            if b["java"].get("memory") in ("1G", "2G", "4G"):
+                j["memory"] = b["java"]["memory"]
         if isinstance(b.get("defaults"), dict):
             for k in ("system", "keep_alive"):
                 if k in b["defaults"]:
@@ -735,6 +744,149 @@ class Handler(BaseHTTPRequestHandler):
     def api_fs(self, method, parts, query):
         """Folders on this computer, for the "open a folder" picker."""
         return self.ok(projects.list_dirs((query.get("path") or [""])[0]))
+
+    def api_java(self, method, parts, query):
+        """The Java tools: setup, one language server per project, and the editor's requests to it."""
+        h = self.hub
+        J = h.java
+        b = self.body() if method == "POST" else {}
+        pid = (query.get("project") or [""])[0] or b.get("project") or ""
+        proj = h.projects.get(pid) if pid else None
+        if pid and not proj:
+            return self.fail(404, "That project was removed.")
+        if method == "GET":
+            out = {"tools": J.tools.status()}
+            if proj:
+                s = J.servers.get(pid)
+                out["is_java"] = J.is_java_project(proj.root)
+                out["server"] = s.info() if s else {"state": "stopped", "message": "", "root_uri": javals.file_uri(proj.root), "counts": {}, "diagnostics": []}
+            return self.ok(out)
+        act = b.get("action")
+        if act == "setup":
+            J.tools.javas(refresh=True)
+            J.tools.install()
+            return self.ok({"tools": J.tools.status()})
+        if not proj:
+            return self.fail(400, "Pick a project.")
+        try:
+            if act == "start":
+                return self.ok({"server": J.server(pid, proj.root).info()})
+            if act in ("stop", "restart"):
+                s = J.servers.get(pid)
+                if s:
+                    s.stop()
+                if act == "restart":
+                    J.servers.pop(pid, None)
+                    return self.ok({"server": J.server(pid, proj.root).info()})
+                return self.ok()
+            s = J.servers.get(pid)
+            if act == "test":
+                cmd = J.test_command(proj.root, str(b.get("cls") or ""), b.get("method") or None, b.get("port") or None)
+                return self.ok({"command": cmd}) if cmd else self.fail(400, "This project has no Maven, Gradle or Ant build to run tests with.")
+            if not s or s.state in ("stopped", "error"):
+                return self.fail(409, "The Java language server isn't running.")
+            if act == "sync":
+                s.sync(b.get("op"), str(b.get("uri") or ""), b.get("text"), b.get("version"))
+                return self.ok()
+            if act == "call":
+                return self.ok({"result": s.call(str(b.get("method") or ""), b.get("params"), timeout=min(int(b.get("timeout") or 30), 120))})
+            if act == "apply":     # an edit from the page (rename, quick fix) for files that aren't open in it
+                return self.ok({"changed": s.apply_edit(b.get("edit") or {}, from_page=True)})
+            if act == "debug":
+                return self.java_debug(h, pid, proj, s, b)
+        except javals.LspError as e:
+            return self.fail(400, str(e))
+        return self.fail(400, "Unknown action")
+
+    def java_debug(self, h, pid, proj, server, b):
+        """Start a debug session (a main method, or one test through the build tool) and drive it."""
+        op = b.get("op")
+        root = os.path.realpath(proj.root)
+
+        def abspath(rel):
+            p = os.path.realpath(os.path.join(root, rel))
+            if not p.startswith(root + os.sep):
+                raise javadebug.DebugError("That file isn't in this project.")
+            return p
+        bps = {abspath(k): v for k, v in (b.get("breakpoints") or {}).items() if isinstance(v, list)}
+        cur = h.debug.get(pid)
+        try:
+            if op in ("launch", "test"):
+                if cur and cur.state != "ended":
+                    cur.control("stop")
+                d = h.debug[pid] = javadebug.Session(server, pid, h.publish)
+
+                def fail(e):
+                    h.publish({"type": "debug", "project": pid, "kind": "output", "category": "stderr", "text": "Debugging couldn't start: %s\n" % e})
+                    d._end()
+                if op == "launch":
+                    cls = str(b.get("cls") or "")
+
+                    def go():
+                        try:
+                            d.launch(cls, b.get("args") or "", b.get("vmargs") or "", bps)
+                        except Exception as e:  # noqa: BLE001 - reported to the page
+                            fail(e)
+                    threading.Thread(target=go, daemon=True).start()
+                    return self.ok({"started": True})
+                # a test: the build tool starts it waiting for a debugger; attach when it says it's listening
+                port = javadebug.free_port()
+                cmd = h.java.test_command(root, str(b.get("cls") or ""), b.get("method") or None, port)
+                if not cmd:
+                    return self.fail(400, "This project has no Maven, Gradle or Ant build to run tests with.")
+                seen = {"text": "", "done": False}
+                label = (str(b.get("cls") or "").split(".")[-1] + ("." + b["method"] if b.get("method") else ""))
+
+                def watch(ev):
+                    h.publish(ev)
+                    if ev.get("type") == "term" and not seen["done"]:
+                        seen["text"] = (seen["text"] + ev.get("data", ""))[-4000:]
+                        m = re.search(r"Listening for transport dt_socket at address:\s*(\d+)", seen["text"])
+                        if m:
+                            seen["done"] = True
+                            threading.Thread(target=lambda: _attach(int(m.group(1))), daemon=True).start()
+                        elif "T E S T S" in seen["text"] and not seen.get("probing"):
+                            # Maven Surefire keeps the test JVM's "Listening" line to itself: wait for the port instead
+                            seen["probing"] = True
+                            threading.Thread(target=_probe, daemon=True).start()
+                    elif ev.get("type") == "term_done" and not seen["done"]:
+                        seen["done"] = True
+                        fail("the test run ended before the debugger could attach (see the Terminal)")
+
+                def _probe():
+                    for _ in range(240):
+                        if seen["done"]:
+                            return
+                        if javadebug.port_open(port):
+                            seen["done"] = True
+                            return _attach(port)
+                        time.sleep(0.5)
+
+                def _attach(p):
+                    try:
+                        d.attach(p, label, bps)
+                    except Exception as e:  # noqa: BLE001 - reported to the page
+                        fail(e)
+                run = h.projects.term_start(pid, cmd, watch, test=True)
+                return self.ok({"command": cmd, "run": run})
+            if not cur:
+                return self.fail(409, "No debug session.")
+            if op == "breakpoints":
+                return self.ok({"breakpoints": cur.set_breakpoints(abspath(str(b.get("path") or "")), b.get("lines") or [])})
+            if op == "control":
+                cur.control(str(b.get("what") or ""), b.get("thread"))
+                return self.ok()
+            if op == "frame":
+                return self.ok(cur.frame(int(b.get("frame"))))
+            if op == "variables":
+                return self.ok({"vars": cur.variables(int(b.get("ref")))})
+            if op == "evaluate":
+                return self.ok(cur.evaluate(str(b.get("expression") or ""), b.get("frame")))
+            if op == "source":
+                return self.ok({"content": cur.source(b.get("ref"))})
+        except (javadebug.DebugError, javals.LspError, ValueError) as e:
+            return self.fail(400, str(e))
+        return self.fail(400, "Unknown debug action")
 
     def api_projects(self, method, parts, query):
         h = self.hub
@@ -1513,6 +1665,9 @@ def serve(port=8765, open_page=True, app_window=True, idle_exit=True):
         pass
     finally:
         hub.servers.stop_all()       # dev servers started from the app stop with it
+        for d in list(hub.debug.values()):
+            d.control("stop")
+        hub.java.stop_all()
         hub.rt.close_all()
         httpd.server_close()
 

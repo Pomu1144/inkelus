@@ -4,9 +4,12 @@ window.VAProjects = function (app) {
   "use strict";
   const { api, toast, guard, esc, openModal, closeModal, $, $$ } = app;
   const P = {
-    list: [], git: true, cur: null, files: [], status: null, openDirs: new Set(), file: null,
+    list: [], git: true, cur: null, files: [], status: null, openDirs: new Set(), file: null, open: [],
     side: "files", term: {}, running: {}, unchecked: new Set(), diffPath: null, defaultParent: "",
   };
+  let Ed = null;           // the code editor (codeeditor.js): Monaco, or a plain textarea if Monaco can't load
+  const keyOf = f => f.project + "\n" + f.path;
+  const openHere = () => P.open.filter(f => f.project === P.cur);
   const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (_) { /* private window */ } return null; };
 
   // ── diffs ────────────────────────────────────────────────────────────
@@ -188,11 +191,7 @@ window.VAProjects = function (app) {
   function cur() { return P.list.find(p => p.id === P.cur); }
 
   async function openProject(id, keepFile) {
-    if (P.file && P.file.dirty && P.file.project !== id && !confirm("Discard unsaved changes to " + P.file.path + "?")) {
-      $("#projPick").value = P.cur;
-      return;
-    }
-    if (P.cur !== id) { P.file = null; P.diffPath = null; P.detail = null; P.tests = null; P.openDirs = new Set(); P.unchecked = new Set(); P.kind = null; }
+    if (P.cur !== id) { P.file = P.open.filter(f => f.project === id).pop() || null; P.diffPath = null; P.detail = null; P.tests = null; P.openDirs = new Set(); P.unchecked = new Set(); P.kind = null; }
     P.cur = id;
     store("va-project", id);
     const p = cur();
@@ -206,6 +205,7 @@ window.VAProjects = function (app) {
       return;
     }
     await refresh(keepFile);
+    if (P.onProject) P.onProject(id);
   }
 
   async function refresh(reloadFile) {
@@ -222,10 +222,8 @@ window.VAProjects = function (app) {
     loadTests();
     if (!P.kind) api("GET", "projects/" + id + "/tasks").then(k => { if (id === P.cur) { P.kind = k; renderTasks(); } }).catch(() => {});
     else renderTasks();
-    if (reloadFile && P.file && !P.file.dirty && P.file.project === id) {
-      if (P.files.includes(P.file.path)) await openFile(P.file.path, true);
-      else { P.file = null; renderEditor(); }
-    } else if (!P.file || P.file.project !== id) renderEditor();
+    if (reloadFile) await reloadOpen(id);
+    renderEditor();
     if (P.diffPath) showDiff(P.diffPath);
   }
 
@@ -238,6 +236,7 @@ window.VAProjects = function (app) {
       k.tasks.map((t, i) => '<button class="btn small" data-task="' + i + '" title="' + esc(t.command) + '">' +
         icon({ Build: "tool", Run: "play", Test: "check", Clean: "clear" }[t.name] || "code") + esc(t.name) + "</button>").join("") +
       '<button class="btn small" data-task="help" title="Ask the AI to explain how this project is built and run">' + icon("spark") + "How do I run this?</button>";
+    if (P.onTasks) P.onTasks(bar);
   }
 
   // git bar
@@ -374,53 +373,86 @@ window.VAProjects = function (app) {
     $("#tree").innerHTML = out.join("") || '<p class="faint small">No files yet.</p>';
   }
 
-  // editor
-  async function openFile(path, quiet) {
-    if (P.file && P.file.dirty && P.file.path !== path && !confirm("Discard unsaved changes to " + P.file.path + "?")) return;
-    const r = await api("GET", "projects/" + P.cur + "/file?path=" + encodeURIComponent(path));
-    P.file = { project: P.cur, path: r.path, text: r.text, reason: r.reason, mtime: r.mtime, dirty: false };
+  // editor: one tab per open file; each keeps its own unsaved edits and undo history
+  async function openFile(path, quiet, at) {
+    let f = P.open.find(x => x.project === P.cur && x.path === path);
+    if (!f) {
+      const r = await api("GET", "projects/" + P.cur + "/file?path=" + encodeURIComponent(path));
+      f = P.open.find(x => x.project === P.cur && x.path === r.path);
+      if (!f) { f = { project: P.cur, path: r.path, text: r.text, reason: r.reason, mtime: r.mtime, dirty: false }; P.open.push(f); }
+    }
+    P.file = f;
     P.diffPath = null;
     P.detail = null;
-    const parts = r.path.split("/");
+    const parts = f.path.split("/");
     for (let i = 1; i < parts.length; i++) P.openDirs.add(parts.slice(0, i).join("/"));
     if (!quiet) renderTree();
     renderEditor();
+    if (at && at.line) Ed.reveal(at.line, at.col);
+    if (P.onOpen) P.onOpen(f);
+    return f;
+  }
+  // files changed on disk (by the AI, a pull, a command): reload the tabs that have no unsaved edits
+  async function reloadOpen(id) {
+    for (const f of P.open.filter(x => x.project === id)) {
+      if (f.dirty || f.text == null || f.jdt) continue;
+      if (!P.files.includes(f.path)) { closeTab(f, true); continue; }
+      try {
+        const r = await api("GET", "projects/" + id + "/file?path=" + encodeURIComponent(f.path));
+        if (r.mtime !== f.mtime || r.text !== f.text) { f.text = r.text; f.mtime = r.mtime; if (Ed.has(keyOf(f))) Ed.setValue(keyOf(f), r.text, true); }
+      } catch (_) { closeTab(f, true); }
+    }
+  }
+  function closeTab(f, force) {
+    if (!force && f.dirty && !confirm("Close " + f.path + " without saving your changes?")) return;
+    Ed.close(keyOf(f));
+    const i = P.open.indexOf(f);
+    if (i >= 0) P.open.splice(i, 1);
+    if (P.file === f) { const here = openHere(); P.file = here[Math.min(i, here.length - 1)] || here[here.length - 1] || null; }
+    if (P.onClose) P.onClose(f);
+    renderTree();
+    renderEditor();
+  }
+  function renderTabs() {
+    const here = openHere();
+    $("#edTabs").hidden = !here.length;
+    $("#edTabs").innerHTML = here.map((f, i) => '<div class="etab' + (f === P.file && !P.diffPath && !P.detail ? " active" : "") + (f.dirty ? " dirty" : "") +
+      '" data-tab="' + i + '" title="' + esc(f.path) + '"><span>' + esc(f.path.split("/").pop()) + '</span><i class="dot"></i><button class="icon-btn" data-close="' + i +
+      '" title="Close">' + icon("close") + "</button></div>").join("");
+    const on = $("#edTabs .etab.active");
+    if (on) on.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
   function renderEditor() {
-    const f = P.file;
+    const f = P.file && P.file.project === P.cur ? P.file : null;
     const diffing = !!P.diffPath || !!P.detail;
+    renderTabs();
     $("#edEmpty").hidden = !!f || diffing;
     $("#edCode").hidden = !f || diffing || f.text == null;
     $("#diffView").hidden = !diffing;
     $("#edPath").textContent = P.detail ? P.detail.label : diffing ? P.diffPath + " (changes)" : f ? f.path : "No file open";
-    $("#edSave").hidden = $("#edDelete").hidden = $("#edAsk").hidden = !f || diffing || f.text == null;
+    $("#edSave").hidden = $("#edDelete").hidden = $("#edAsk").hidden = !f || diffing || f.text == null || !!f.readOnly;
     $("#edDiff").hidden = !f || diffing || !statusMap()[f.path];
-    $("#edState").textContent = f && !diffing ? (f.text == null ? f.reason || "" : f.dirty ? "Unsaved changes" : "") : "";
+    $("#edState").textContent = f && !diffing ? (f.text == null ? f.reason || "" : f.readOnly ? "Read-only" : f.dirty ? "Unsaved changes" : "") : "";
     if (diffing && f) $("#edDiff").hidden = true;
-    if (!f || diffing) return;
+    if (!f || diffing) { if (P.onRender) P.onRender(null); return; }
     if (f.text == null) { $("#edEmpty").hidden = false; $("#edEmpty").textContent = f.reason || "Can't open this file."; return; }
     $("#edEmpty").textContent = "Pick a file on the left. Ctrl+S saves.";
-    const code = $("#code");
-    if (code.value !== f.text) code.value = f.text;
-    gutter();
-  }
-  function gutter() {
-    const n = $("#code").value.split("\n").length;
-    let s = "";
-    for (let i = 1; i <= n; i++) s += i + "\n";
-    $("#gutter").textContent = s;
-    $("#gutter").scrollTop = $("#code").scrollTop;
+    Ed.open(keyOf(f), f.path, f.text, { readOnly: f.readOnly, language: f.jdt ? "java" : undefined });
+    if (P.onRender) P.onRender(f);
   }
   async function save(force) {
     const f = P.file;
-    if (!f || f.text == null) return;
+    if (!f || f.text == null || f.readOnly) return;
+    const text = Ed.value(keyOf(f));
     try {
-      const r = await api("PUT", "projects/" + f.project + "/file", { path: f.path, text: $("#code").value, mtime: f.mtime, force: !!force });
-      f.text = $("#code").value;
+      const r = await api("PUT", "projects/" + f.project + "/file", { path: f.path, text, mtime: f.mtime, force: !!force });
+      f.text = text;
       f.mtime = r.mtime;
       f.dirty = false;
+      Ed.markSaved(keyOf(f));
       renderEditor();
       toast("Saved " + f.path);
+      if (P.onSave) P.onSave(f);
       refresh();
     } catch (e) {
       if (/changed on disk/.test(e.message)) {
@@ -430,27 +462,20 @@ window.VAProjects = function (app) {
       throw e;
     }
   }
-  function indentUnit(text) {
-    const lines = text.split("\n");
-    const tabs = lines.filter(l => l.startsWith("\t")).length;
-    const two = lines.filter(l => /^ {2}\S/.test(l)).length, four = lines.filter(l => /^ {4}\S/.test(l)).length;
-    return tabs > two + four ? "\t" : two > four ? "  " : "    ";
-  }
   async function newFile() {
     const name = prompt("New file (path inside the project, e.g. src/utils.py):");
     if (!name || !name.trim()) return;
     const r = await api("PUT", "projects/" + P.cur + "/file", { path: name.trim(), text: "", create: true });
     await refresh();
     await openFile(r.path);
-    $("#code").focus();
+    Ed.focus();
   }
   async function deleteFile() {
     const f = P.file;
     if (!f || !confirm("Delete " + f.path + "? " + (statusMap()[f.path] && statusMap()[f.path].code === "?" ? "It isn't in Git, so it can't be recovered." : "You can get it back from Git until you commit."))) return;
     await api("DELETE", "projects/" + f.project + "/file?path=" + encodeURIComponent(f.path));
-    P.file = null;
+    closeTab(f, true);
     await refresh();
-    renderEditor();
     toast("Deleted " + f.path);
   }
 
@@ -511,7 +536,8 @@ window.VAProjects = function (app) {
       "Throw away your changes to " + path + " and go back to the last commit?")) return;
     await api("POST", "projects/" + P.cur + "/git", { op: "discard", path });
     if (P.diffPath === path) P.diffPath = null;
-    if (P.file && P.file.path === path) P.file.dirty = false;
+    const open = P.open.find(x => x.project === P.cur && x.path === path);
+    if (open) { open.dirty = false; open.mtime = null; Ed.markSaved(keyOf(open)); }
     await refresh(true);
     toast("Discarded changes to " + path);
   }
@@ -525,10 +551,7 @@ window.VAProjects = function (app) {
   function setSide(name) {
     P.side = name;
     $$(".side-tabs .tab").forEach(t => t.classList.toggle("active", t.dataset.side === name));
-    $("#sideFiles").hidden = name !== "files";
-    $("#sideChanges").hidden = name !== "changes";
-    $("#sideHistory").hidden = name !== "history";
-    $("#sideTests").hidden = name !== "tests";
+    $$(".ws-side .side-pane").forEach(el => (el.hidden = el.id !== "side" + name.charAt(0).toUpperCase() + name.slice(1)));
     if (name !== "changes" && P.diffPath) { P.diffPath = null; renderEditor(); }
     if (name !== "tests" && P.detail) { P.detail = null; renderEditor(); }
   }
@@ -599,7 +622,7 @@ window.VAProjects = function (app) {
   async function runTests(command, suggestion) {
     if (P.running[P.cur]) { toast("A command is still running in the Terminal. Stop it first.", true); return; }
     termWrite(P.cur, (P.term[P.cur] ? "\n" : "") + "$ " + command + "\n");
-    $("#term").classList.remove("collapsed");
+    showPanel("term");
     const r = await api("POST", "projects/" + P.cur + "/terminal", { command, test: true, suggestion: suggestion || "" });
     P.running[P.cur] = r.run;
     renderTerm();
@@ -652,6 +675,16 @@ window.VAProjects = function (app) {
   }
 
   // terminal
+  // the bottom panel: Terminal, Problems, Usages, Debug (the last three come from javaide.js)
+  function showPanel(name) {
+    P.panel = name;
+    $$("#panelTabs .ptab").forEach(t => t.classList.toggle("active", t.dataset.panel === name));
+    $("#termOut").hidden = name !== "term";
+    $("#termTools").hidden = name !== "term";
+    ["problems", "usages", "debug"].forEach(n => ($("#" + n + "Pane").hidden = name !== n));
+    $("#term").classList.remove("collapsed");
+    if (P.onPanel) P.onPanel(name);
+  }
   function renderTerm() {
     const out = $("#termOut");
     out.textContent = P.term[P.cur] || "";
@@ -787,6 +820,7 @@ window.VAProjects = function (app) {
       if (!confirm("Remove " + p.name + " from the app? The folder and files are not deleted.")) return;
       await api("DELETE", "projects/" + p.id);
       closeModal();
+      P.open.filter(f => f.project === p.id).forEach(f => closeTab(f, true));
       P.cur = null;
       P.file = null;
       await show();
@@ -869,38 +903,23 @@ window.VAProjects = function (app) {
       const f = e.target.closest("[data-file]");
       if (f) { if (P.side !== "files") setSide("files"); await openFile(f.dataset.file); }
     });
-    const code = $("#code");
-    code.oninput = () => {
-      if (!P.file) return;
-      const dirty = code.value !== P.file.text;
-      if (dirty !== P.file.dirty) { P.file.dirty = dirty; $("#edState").textContent = dirty ? "Unsaved changes" : ""; }
-      gutter();
-    };
-    code.onscroll = () => ($("#gutter").scrollTop = code.scrollTop);
-    code.onkeydown = e => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); guard(save)(); return; }
-      if (e.key === "Tab" && !e.ctrlKey && !e.altKey) {
-        e.preventDefault();
-        const unit = indentUnit(code.value);
-        const s = code.selectionStart, en = code.selectionEnd, v = code.value;
-        if (s === en && !e.shiftKey) { document.execCommand("insertText", false, unit); return; }
-        const ls = v.lastIndexOf("\n", s - 1) + 1;
-        const block = v.slice(ls, en);
-        const changed = e.shiftKey ? block.replace(new RegExp("^(\\t| {1," + unit.length + "})", "gm"), "")
-          : block.replace(/^/gm, unit);
-        code.setSelectionRange(ls, en);
-        document.execCommand("insertText", false, changed);
-        code.setSelectionRange(ls, ls + changed.length);
-      } else if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey) {
-        // keep the indentation of the line above
-        const s = code.selectionStart, v = code.value;
-        const line = v.slice(v.lastIndexOf("\n", s - 1) + 1, s);
-        let ind = (/^[ \t]*/.exec(line) || [""])[0];
-        if (/[:{[(]\s*$/.test(line)) ind += indentUnit(v);
-        e.preventDefault();
-        document.execCommand("insertText", false, "\n" + ind);
-      }
-    };
+    Ed = window.VAEditor($("#edCode"));
+    Ed.on("change", (key, dirty) => {
+      const f = P.open.find(x => keyOf(x) === key);
+      if (!f || f.dirty === dirty) return;
+      f.dirty = dirty;
+      renderTabs();
+      if (f === P.file) $("#edState").textContent = dirty ? "Unsaved changes" : "";
+    });
+    Ed.on("save", () => guard(save)());
+    $("#edTabs").addEventListener("click", guard(async e => {
+      const here = openHere();
+      const x = e.target.closest("[data-close]");
+      if (x) { e.stopPropagation(); closeTab(here[+x.dataset.close]); return; }
+      const t = e.target.closest("[data-tab]");
+      if (t) { const f = here[+t.dataset.tab]; P.file = f; P.diffPath = null; P.detail = null; renderTree(); renderEditor(); }
+    }));
+    $("#edTabs").addEventListener("auxclick", e => { const t = e.target.closest("[data-tab]"); if (t && e.button === 1) closeTab(openHere()[+t.dataset.tab]); });
     $("#edSave").onclick = guard(() => save());
     $("#edDelete").onclick = guard(deleteFile);
     $("#edDiff").onclick = guard(async () => { setSide("changes"); await showDiff(P.file.path); });
@@ -937,7 +956,21 @@ window.VAProjects = function (app) {
     });
     $("#termStop").onclick = guard(async () => { await api("POST", "projects/" + P.cur + "/terminal", { stop: true }); });
     $("#termClear").onclick = () => { P.term[P.cur] = ""; renderTerm(); };
+    try { const hgt = +localStorage.getItem("va-term-h"); if (hgt) $("#term").style.height = hgt + "px"; } catch {}
+    $("#termGrip").onmousedown = e => {          // drag the panel's top edge to make it taller or shorter
+      e.preventDefault();
+      const grip = e.currentTarget, term = $("#term"), y0 = e.clientY, h0 = term.offsetHeight;
+      grip.classList.add("drag");
+      const move = ev => { term.style.height = Math.max(120, Math.min(innerHeight * 0.75, h0 + y0 - ev.clientY)) + "px"; Ed.layout(); };
+      const up = () => {
+        grip.classList.remove("drag");
+        removeEventListener("mousemove", move); removeEventListener("mouseup", up);
+        try { localStorage.setItem("va-term-h", term.offsetHeight); } catch {}
+      };
+      addEventListener("mousemove", move); addEventListener("mouseup", up);
+    };
     $("#termToggle").onclick = () => { $("#term").classList.toggle("collapsed"); $("#termToggle").innerHTML = icon($("#term").classList.contains("collapsed") ? "chevron-up" : "chevron-down"); };
+    $("#panelTabs").onclick = e => { const t = e.target.closest("[data-panel]"); if (t) showPanel(t.dataset.panel); };
     $("#termCmd").onkeydown = e => {
       if (e.key === "Enter") { e.preventDefault(); guard(termRun)(); }
       else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
@@ -949,16 +982,16 @@ window.VAProjects = function (app) {
       }
     };
     window.addEventListener("focus", () => { if (app.S.view === "projects" && P.cur) guard(refresh)(true); });
-    window.addEventListener("beforeunload", e => { if (P.file && P.file.dirty) { e.preventDefault(); e.returnValue = ""; } });
+    window.addEventListener("beforeunload", e => { if (P.open.some(f => f.dirty)) { e.preventDefault(); e.returnValue = ""; } });
   }
 
-  function leaving() {
-    if (P.file && P.file.dirty && !confirm("Discard unsaved changes to " + P.file.path + "?")) return false;
-    if (P.file && P.file.dirty) { P.file.dirty = false; P.file.text = null; P.file = null; }
-    return true;
-  }
+  // unsaved edits stay in their tabs when you go to another page
+  function leaving() { return true; }
 
   wire();
   return { show, load, onEvent, renderDiff, confirmView, toolExtra, undo, pickForChat, projectName, leaving,
+    // for the Java tools (javaide.js)
+    get state() { return P; }, get editor() { return Ed; }, openFile, renderEditor, renderTabs, refresh, keyOf, setSide, showPanel, runTests,
+    cur, closeTab,
     get list() { return P.list; } };
 };

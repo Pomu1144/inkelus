@@ -21,6 +21,37 @@ def _read(path, limit=200000):
         return ""
 
 
+def netbeans_run(root, mvn):
+    """The Run command NetBeans saved for a Maven project (nbactions.xml: its goals and properties), or None."""
+    import xml.etree.ElementTree as ET
+    try:
+        tree = ET.fromstring(_read(os.path.join(root, "nbactions.xml")))
+    except ET.ParseError:
+        return None
+    for action in tree.iter("action"):
+        if (action.findtext("actionName") or "").strip() != "run":
+            continue
+        goals = [(g.text or "").strip() for g in action.iter("goal") if (g.text or "").strip()]
+        if not goals:
+            return None
+        parts = [mvn] + goals
+        for prop in list(action.find("properties") if action.find("properties") is not None else []):
+            value = (prop.text or "").strip()
+            if value and re.match(r"^[\w.-]+$", prop.tag):
+                parts.append("-D%s=%s" % (prop.tag, _quote(value)))
+        return " ".join(parts)
+    return None
+
+
+def _quote(value):
+    """A -D value for the shell: left as is when plain, else quoted so ${...} reaches Maven untouched."""
+    if re.match(r"^[\w.:/,=@+-]+$", value):
+        return value
+    if sys.platform == "win32":
+        return '"%s"' % value.replace('"', '\\"')
+    return "'%s'" % value.replace("'", "'\\''")
+
+
 def detect(root):
     """{"type": label, "tasks": [{"name", "command"}]} for the project at root (tasks may be empty)."""
     j = lambda *p: os.path.join(root, *p)
@@ -34,6 +65,9 @@ def detect(root):
         m = testlog.mvn(root)
         pom = _read(j("pom.xml"))
         add("Build", m + " compile")
+        nb = netbeans_run(root, m)
+        if nb:
+            add("Run", nb)
         if "spring-boot-maven-plugin" in pom:
             add("Run", m + " spring-boot:run")
         elif "exec-maven-plugin" in pom or "<mainClass>" in pom:

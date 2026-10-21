@@ -114,6 +114,7 @@
               <button class="tab" data-side="changes">Changes <b id="chgCount"></b></button>
               <button class="tab" data-side="tests">Tests <b id="testBadge"></b></button>
               <button class="tab" data-side="history">History</button>
+              <button class="tab" data-side="outline" id="outlineTab" hidden title="The classes, methods and fields in the open file">Outline</button>
             </div>
             <div class="side-pane" id="sideFiles">
               <div class="row tight"><input id="fileFilter" type="search" placeholder="Find a file"><button class="icon-btn" id="newFile" title="New file"><i data-icon="file-plus"></i></button><button class="icon-btn" id="refreshFiles" title="Refresh"><i data-icon="refresh"></i></button></div>
@@ -133,20 +134,31 @@
               <div class="tests" id="tests"></div>
             </div>
             <div class="side-pane" id="sideHistory" hidden><div class="history" id="history"></div></div>
+            <div class="side-pane" id="sideOutline" hidden><div class="outline" id="outline"></div></div>
           </aside>
           <div class="ws-main">
+            <div class="etabs" id="edTabs" hidden></div>
             <div class="ed-head" id="edHead"><span class="ed-path" id="edPath">No file open</span><span class="faint small" id="edState"></span>
               <span class="ed-acts"><button class="btn small" id="edDiff" hidden>Diff</button><button class="btn small" id="edAsk" hidden>Ask AI</button>
               <button class="btn small danger" id="edDelete" hidden>Delete</button><button class="btn small primary" id="edSave" hidden>Save</button></span></div>
             <div class="editor" id="editor">
               <div class="ed-empty faint" id="edEmpty">Pick a file on the left. Ctrl+S saves.</div>
-              <div class="ed-code" id="edCode" hidden><pre class="gutter" id="gutter"></pre><textarea id="code" spellcheck="false" wrap="off"></textarea></div>
+              <div class="ed-host" id="edCode" hidden></div>
               <div class="diffview" id="diffView" hidden></div>
             </div>
+            <div class="jbar" id="javaBar" hidden></div>
             <div class="term" id="term">
-              <div class="term-head"><span class="faint small">TERMINAL</span><input id="termCmd" placeholder="Run a command in the project folder, e.g. pytest, npm test, git status" spellcheck="false">
-                <button class="btn small" id="termRun">Run</button><button class="btn small" id="termStop" hidden>Stop</button><button class="icon-btn" id="termClear" title="Clear"><i data-icon="clear"></i></button><button class="icon-btn" id="termToggle" title="Hide or show"><i data-icon="chevron-down"></i></button></div>
+              <div class="term-grip" id="termGrip" title="Drag to resize"></div>
+              <div class="term-head">
+                <div class="ptabs" id="panelTabs"><button class="ptab active" data-panel="term">Terminal</button><button class="ptab" data-panel="problems" hidden>Problems <b id="probCount"></b></button><button class="ptab" data-panel="usages" hidden>Usages</button><button class="ptab" data-panel="debug" hidden>Debug</button></div>
+                <span class="term-tools" id="termTools"><input id="termCmd" placeholder="Run a command in the project folder, e.g. pytest, npm test, git status" spellcheck="false">
+                <button class="btn small" id="termRun">Run</button><button class="btn small" id="termStop" hidden>Stop</button><button class="icon-btn" id="termClear" title="Clear"><i data-icon="clear"></i></button></span>
+                <span class="panel-tools" id="panelTools"></span>
+                <button class="icon-btn" id="termToggle" title="Hide or show"><i data-icon="chevron-down"></i></button></div>
               <pre class="term-out" id="termOut"></pre>
+              <div class="ppane" id="problemsPane" hidden></div>
+              <div class="ppane" id="usagesPane" hidden></div>
+              <div class="ppane" id="debugPane" hidden></div>
             </div>
           </div>
         </div>
@@ -341,6 +353,14 @@
           <div class="row"><button class="btn" id="agentOpen">Open the agent browser</button><span class="faint small" id="agentStatus"></span></div>
         </div>
         <div class="panel">
+          <h3>Java</h3>
+          <p class="faint small">Java projects get NetBeans-style help in the editor (errors as you type, completion, go to definition, rename, fix imports) and a debugger. It runs the Eclipse Java language server, downloaded once from eclipse.org when you first open a Java project; it needs a JDK 17 or newer to run (21 is best), while your projects can use any Java version.</p>
+          <label>JDK folder (leave empty to find one automatically)<input id="javaHome" placeholder="C:\Program Files\Eclipse Adoptium\jdk-21"></label>
+          <label class="inline">Memory for the language server
+            <select id="javaMem"><option value="1G">1 GB</option><option value="2G">2 GB (big projects)</option><option value="4G">4 GB</option></select></label>
+          <div class="faint small" id="javaStatus"></div>
+        </div>
+        <div class="panel">
           <h3>Servers</h3>
           <div id="connList"></div>
           <form id="connForm" class="grid2">
@@ -377,7 +397,10 @@
 <script src="/static/icons.js"></script>
 <script src="/static/markdown.js"></script>
 <script src="/static/vault.js"></script>
+<script src="/static/vendor/monaco/vs/loader.js"></script>
+<script src="/static/codeeditor.js"></script>
 <script src="/static/projects.js"></script>
+<script src="/static/javaide.js"></script>
 <script src="/static/apiview.js"></script>
 <script src="/static/app.js"></script>
 </body>

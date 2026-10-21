@@ -298,18 +298,41 @@ class TestLog:
 
 
 def mvn(root):
-    """The Maven command for a project: its wrapper if it has one."""
+    """The Maven command for a project: its wrapper, mvn on the PATH, or the copy that comes with NetBeans."""
+    import shutil
     if os.path.exists(os.path.join(root, "mvnw.cmd" if sys.platform == "win32" else "mvnw")):
         return "mvnw.cmd" if sys.platform == "win32" else "./mvnw"
-    return "mvn"
+    if shutil.which("mvn"):
+        return "mvn"
+    return netbeans_tool(("java", "maven", "bin", "mvn.cmd" if sys.platform == "win32" else "mvn")) or "mvn"
 
 
 def ant():
     """The Ant command: ant on the PATH, or the copy that comes with NetBeans."""
-    import glob
     import shutil
     if shutil.which("ant"):
         return "ant"
+    return netbeans_tool(("extide", "ant", "bin", "ant.bat" if sys.platform == "win32" else "ant")) or "ant"
+
+
+def netbeans_tool(rel):
+    """A program inside a NetBeans installation (rel: path parts below the netbeans folder), quoted if needed."""
+    import glob
+    home = os.path.expanduser("~")
+    if sys.platform == "win32":
+        bases = [os.environ.get(v, "") for v in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")]
+        dirs = [os.path.join(b, d) for b in bases if b
+                for d in ("NetBeans*", os.path.join("NetBeans*", "netbeans"), "Apache NetBeans*", os.path.join("Apache", "NetBeans*"),
+                          os.path.join("Apache", "NetBeans*", "netbeans"))]
+    elif sys.platform == "darwin":
+        dirs = ["/Applications/*NetBeans*.app/Contents/Resources/netbeans", "/Applications/*NetBeans*.app/Contents/Resources/NetBeans/netbeans"]
+    else:
+        dirs = [os.path.join(home, "netbeans*"), os.path.join(home, "netbeans*", "netbeans"), "/usr/local/netbeans*", "/opt/netbeans*",
+                "/opt/netbeans*/netbeans", "/usr/share/netbeans*", "/snap/netbeans/current/netbeans"]
+    found = sorted({p for d in dirs for p in glob.glob(os.path.join(d, *rel))}, reverse=True)
+    if not found:
+        return None
+    return '"%s"' % found[0] if " " in found[0] else found[0]
     home = os.path.expanduser("~")
     if sys.platform == "win32":
         bases = [os.environ.get(v, "") for v in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")]
