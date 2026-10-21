@@ -30,7 +30,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import agent_browser, api, apirun, engine, gitops, javadebug, javals, net, projects, providers, realtime, tasks, tsls, web
+from . import agent_browser, api, apirun, context, engine, gitops, javadebug, javals, net, projects, providers, realtime, tasks, tsls, web
 from .library import KINDS, Library
 from .store import Store, new_id
 
@@ -64,6 +64,11 @@ class Hub:
         self.ts = tsls.TypeScript(self.store.dir, self.store.settings.setdefault("ts", {}), self.publish)   # TypeScript/JavaScript ones
         self.debug = {}             # project id -> javadebug.Session
         self.oauth_pending = {}      # OAuth state -> {"auth", "vals", "verifier", "redirect"}
+        self.context_path = os.path.join(self.store.dir, "context.json")
+        self.context_synced = context.Graph.load(self.context_path)   # the last work-context sync
+        self.context_manual = context.Manual(os.path.join(self.store.dir, "context_manual.json"))   # notes and links you add
+        self.context_syncing = False
+        self.context_rebuild()
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
         self.clients = []           # one queue per open event stream
@@ -91,6 +96,32 @@ class Hub:
             finally:
                 self.script_calls.pop(rid, None)
         return apirun.node_runner(ctx)
+
+    # work context: GitHub PRs, Jira issues and email, synced on a worker thread, plus your own notes and links
+    def context_rebuild(self):
+        cfg = dict(context.DEFAULTS, **(self.store.settings.get("context") or {}))
+        self.context = context.combine(self.context_synced, self.context_manual, cfg)
+
+    def context_sync(self):
+        with self.lock:
+            if self.context_syncing:
+                return False
+            self.context_syncing = True
+        cfg = dict(context.DEFAULTS, **(self.store.settings.get("context") or {}))
+
+        def work():
+            try:
+                g = context.sync(cfg, self.context_manual.text())
+                g.save(self.context_path)
+                self.context_synced = g
+                self.context_rebuild()
+                self.publish({"type": "context", "ok": True, "errors": g.errors, "count": len(g.nodes)})
+            except Exception as e:      # keep the last good sync
+                self.publish({"type": "context", "ok": False, "errors": [str(e)]})
+            finally:
+                self.context_syncing = False
+        threading.Thread(target=work, daemon=True).start()
+        return True
 
     # OAuth 2.0 authorization code: the user signs in in a browser window, which comes back to /oauth/callback
     def oauth_begin(self, auth, vals, redirect):
@@ -235,7 +266,7 @@ class Hub:
         agent = engine.agent_for(self.store) if c.get("agent") else None
         threading.Thread(target=engine.run_turn, daemon=True,
                          args=(self.store, self.library, c, conn, model, cancel, emit, ask_tool, box, agent,
-                               self.projects)).start()
+                               self.projects, lambda: self.context)).start()
         self.publish({"type": "chat", "chat": chat_summary(c, self), "messages": c["messages"]})
 
 
@@ -248,6 +279,7 @@ def public_settings(s):
     out = json.loads(json.dumps(s))
     for c in out["connections"]:
         c["key"] = KEY_MASK if c.get("key") else ""
+    out["context"] = context.masked(s.get("context"), KEY_MASK)
     return out
 
 
@@ -449,7 +481,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.ok({"chat": c, "busy": c["id"] in h.streams})
             if method == "PATCH":
                 b = self.body()
-                for k in ("title", "model", "browser", "agent", "docs", "template", "group", "project"):
+                for k in ("title", "model", "browser", "agent", "context", "docs", "template", "group", "project"):
                     if k in b:
                         c[k] = b[k]
                 if "title" in b:
@@ -658,6 +690,9 @@ class Handler(BaseHTTPRequestHandler):
                     moved = True
             if moved:
                 h.save_chats()
+        if isinstance(b.get("context"), dict):
+            context.update_settings(s.setdefault("context", {}), b["context"], KEY_MASK)
+            h.context_rebuild()
         for k in ("last_model", "default_conn", "web_theme"):
             if k in b:
                 s[k] = b[k]
@@ -934,6 +969,47 @@ class Handler(BaseHTTPRequestHandler):
         except (javadebug.DebugError, javals.LspError, ValueError) as e:
             return self.fail(400, str(e))
         return self.fail(400, "Unknown debug action")
+    def api_context(self, method, parts, query):
+        h = self.hub
+        item = (query.get("item") or [""])[0]
+        if method == "GET" and item:
+            n = h.context.nodes.get(item)
+            return self.ok({"item": n}) if n else self.fail(404, "That item is gone; sync again.")
+        if method == "GET":
+            return self.ok({"graph": h.context.for_page(), "syncing": h.context_syncing,
+                            "sources": context.configured(h.store.settings.get("context") or {})})
+        if method != "POST":
+            return self.fail(405, "Method not allowed")
+        b = self.body()
+        act, m = b.get("action"), h.context_manual
+        if act == "sync":
+            if not context.configured(h.store.settings.get("context") or {}):
+                return self.fail(400, "Add GitHub, Jira or email in Settings › Work context first.")
+            h.context_sync()
+            return self.ok({"syncing": True})
+        with h.lock:
+            try:
+                if act == "note":            # add, or edit when an id is given
+                    note = m.put_note(b, b.get("id") or "")
+                elif act == "delete_note":
+                    m.delete_note(b.get("id") or "")
+                    note = None
+                elif act in ("link", "unlink"):
+                    a, c = str(b.get("a") or ""), str(b.get("b") or "")
+                    if a not in h.context.nodes or c not in h.context.nodes:
+                        return self.fail(400, "Both items have to be on the Context page.")
+                    if act == "link":
+                        m.link(a, c)
+                        m.save()
+                    else:
+                        m.unlink(a, c)
+                    note = None
+                else:
+                    return self.fail(400, "Unknown action")
+            except ValueError as e:
+                return self.fail(400, str(e))
+            h.context_rebuild()
+        return self.ok({"note": note})     # the page reloads the graph itself
 
     def api_projects(self, method, parts, query):
         h = self.hub

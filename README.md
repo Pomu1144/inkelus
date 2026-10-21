@@ -72,6 +72,10 @@ on the start page. **Blue dark**, **Light** and **Match system** are in
   with reports, OpenAPI / Postman / curl import, WebSocket and SSE. It also
   runs your dev server and checks the endpoints in your code against the
   docs. See [API](#api) below.
+- **Context**: your GitHub pull requests, Jira issues and email, plus notes
+  you add yourself, in one diagram, linked where they mention each other or
+  where you linked them, and readable by the model.
+  See [Context](#context) below.
 - **Library**: a place to keep **documents** (reference material the AI
   can read) and **templates** (examples of how answers should be laid out).
   See [Library](#library) below.
@@ -286,6 +290,94 @@ TypeScript's and uses your project's own Angular language service:
 
 Debugging a React or Angular app in the browser is best done in Chrome's
 DevTools.
+
+## Context
+
+The **Context** page shows your GitHub pull requests, Jira issues and email
+together, with lines between the items that mention each other, and lets the
+model read the same data.
+
+**Set it up** in **Settings › Work context**, then press **Sync**:
+
+- **GitHub**: the repositories (`owner/repo`) and a personal access token
+  (read-only is enough; public repos don't need one). Change the API URL
+  for GitHub Enterprise.
+- **Jira**: your site URL. For Jira Cloud, your login email and an API
+  token; for Jira Server / Data Center, leave the email empty and use a
+  personal access token. Optionally limit which project keys count, and
+  add a JQL query for extra issues (e.g. `assignee = currentUser()`).
+- **Email**: any IMAP account (server, username and an app password), a
+  folder, and how many days back to read.
+
+**How items are linked.** A sync reads recent pull requests, recent email,
+and every Jira issue mentioned in them. Items are joined when one mentions
+another: a Jira key like `ABC-123` in a PR's title, branch or description, a
+PR link or `owner/repo#12` in an email or issue, or a Jira key in an email.
+Key-shaped words like `UTF-8` are ignored, and so is quoted text in replies.
+Linked items form a **thread**.
+
+**The tree** (the default view) shows each thread as an outline, like a
+folder tree. The main Jira issue is at the top, the pull requests that work
+on it are under it, and the emails and notes that discuss each PR are under
+that. Every branch says how the items relate ("worked on in", "discussed in",
+"for", "mentions", "noted", with "by you" on links you drew). Fold or
+unfold branches (big threads start folded), or a whole thread. An item can
+be linked to more than one thing, but it only appears once in the tree. Its
+other links show as small link buttons that jump to the other item. To see a
+thread from another item's point of view, select it and press **Start the
+tree here**.
+
+**Graph** is a mind map, like Obsidian's graph view. Every item is a dot,
+coloured by kind and bigger the more it's linked, and every link is a line.
+The layout arranges itself, so linked items pull together and each
+thread forms its own island. Hover a dot to light up what it's linked to;
+click it for its details. Drag dots around, drag the background to pan,
+scroll to zoom (names appear as you zoom in), and press the fit button to
+see everything. Links you drew are dashed purple.
+
+**Columns** shows the same threads as bands with Jira, pull request and
+email columns and lines between linked items (a dashed line joins an issue
+and an email directly). Notes you add get their own column. Switch views
+with **Tree / Graph / Columns** at the top. In any view, hover an item to highlight its links; click it for its
+details, everything linked to it, **Open** (in GitHub or Jira) and **Ask
+about this**. Filter by words, and tick **Unlinked** to see items that don't
+mention anything else. Problems from a sync (a wrong token, a missing repo)
+show in the status line; click it for details.
+
+**Adding context by hand.** Not everything lives in GitHub, Jira or email.
+Press **Add note** to add your own: meeting notes, a Slack thread, a
+decision, a link to a document. A note that mentions `ABC-123` or a PR links
+to it automatically, and you can tick items to link it to when you write it
+(or press **+ Note** on a selected item). **Link to…** on any item draws a
+link by hand between two items that belong together but don't mention each
+other; links you drew show in purple and have a remove button. Notes and
+your links are kept in `context_manual.json`, so a sync never touches them,
+and notes work even with no sources set up.
+
+**Asking the model.** Turn on **Context** in a chat's header, or press **Ask
+about this** on an item. The model can list the threads, search everything,
+and read any item with what it's linked to, so it can answer questions like
+"what's the status of ABC-101 and what did people say about the fix?"
+
+**At scale.** The page stays quick with thousands of items. It was tested
+with 1000 pull requests, 1000 Jira issues, 1000 emails and 500 notes:
+
+- A sync of all of that took under a second against a test server.
+- Tree and Columns show 40 threads at a time; **Show more** adds 40 more,
+  and the filter box finds everything.
+- The Graph runs at 60 fps once laid out.
+- A long item's text arrives in full when you open it.
+
+Sync pages through GitHub and Jira. It reads up to 1000 pull requests per
+repository (set "Pull requests per repository") and up to 1000 Jira
+issues, fetching mentioned issues 50 at a time. With a lot of context, the
+model gets a short overview and reads the details it needs.
+
+Everything is **read-only**: nothing is changed in GitHub or Jira, and email
+isn't marked as read. Each sync is saved in the app's data folder
+(`context.json`), so the diagram works offline, and the model reads that
+saved copy without going online. Tokens and passwords are kept in
+`settings.json` (like server API keys) and never sent to the page.
 
 ## API
 
@@ -627,6 +719,8 @@ vscode_assistant/javadebug.py      the Java debugger (talks to the java-debug pl
 vscode_assistant/tsls.py           TypeScript/JavaScript: typescript-language-server, ESLint, Angular, Prettier, test runners
 vscode_assistant/engine.py         the chat + tool loop
 vscode_assistant/projects.py       projects: file access, the AI's coding tools, commands, undo
+vscode_assistant/context.py        work context: GitHub, Jira and IMAP sync, linking, the model's tools
+vscode_assistant/static/contextview.js  the Context page
 vscode_assistant/api.py            API collections, variables, auth, sending, import/export, code snippets
 vscode_assistant/apirun.py         the collection runner, its reports, and the command-line runner
 vscode_assistant/realtime.py       WebSocket and SSE connections for the API screen

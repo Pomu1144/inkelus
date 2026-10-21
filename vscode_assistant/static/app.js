@@ -8,6 +8,7 @@
   let Projects = null;   // projects.js, set up in start()
   let Api = null;        // apiview.js
   let Java = null;       // javaide.js
+  let Ctx = null;        // contextview.js
 
   const S = {
     settings: null, chats: [], library: { documents: [], templates: [] }, dataDir: "",
@@ -101,6 +102,7 @@
   function handleEvent(ev) {
     if (Projects && (ev.type === "term" || ev.type === "term_done" || ev.type === "chat" || ev.type === "tests")) Projects.onEvent(ev);
     if (Java && (ev.type === "java" || ev.type === "java_setup" || ev.type === "debug")) Java.onEvent(ev);
+    if (Ctx && ev.type === "context") Ctx.onEvent(ev);
     if (Api && ["server", "server_log", "script", "api_progress", "oauth", "rt", "rt_closed"].includes(ev.type)) Api.onEvent(ev);
     if (ev.type === "delta") {
       if (S.chat && ev.chat_id === S.chat.id) {
@@ -232,6 +234,7 @@
     if (name === "passwords") renderVault();
     if (name === "projects") guard(Projects.show)();
     if (name === "api") guard(Api.show)();
+    if (name === "context") guard(Ctx.show)();
   }
 
   // ── Chat ─────────────────────────────────────────────────────────────
@@ -337,6 +340,9 @@
     const pname = c && c.project && Projects ? Projects.projectName(c.project) : "";
     $("#projBtn").textContent = "Project · " + (pname || "none");
     $("#projBtn").classList.toggle("on", !!pname);
+    const cx = !!(c && c.context);
+    $("#ctxBtn").textContent = "Context · " + (cx ? "on" : "off");
+    $("#ctxBtn").classList.toggle("on", cx);
     const ag = !!(c && c.agent);
     $("#agentBtn").textContent = "Browser · " + (ag ? "on" : "off");
     $("#agentBtn").classList.toggle("on", ag);
@@ -974,6 +980,9 @@
     $("#dataDir").textContent = "Conversations and settings are saved in " + S.dataDir;
     const ag = s.agent || {};
     $("#agentConfirm").value = ag.confirm || "actions";
+    const cx = s.context || {};
+    $$("[data-ctx]").forEach(el => (el.value = cx[el.dataset.ctx] ?? ""));
+    $("#ctxSaved").textContent = "";
     $("#agentSteps").value = ag.max_steps || 25;
     $("#agentChrome").value = ag.chrome_path || "";
     api("GET", "agent/status").then(r => {
@@ -1138,6 +1147,24 @@
       renderChat();
       toast(on ? "Fast mode on: the model skips its reasoning step and answers straight away."
                : "Fast mode off: reasoning models think before answering.");
+    });
+    $("#ctxBtn").onclick = guard(async () => {
+      const c = await patchChat({ context: !(S.chat && S.chat.context) });
+      renderChat();
+      toast(c.context ? "Context on: the model can read your synced pull requests, Jira issues and email (the saved copy; nothing goes online)."
+        : "Context off for this chat.");
+    });
+    const saveCtx = async () => {
+      const v = {};
+      $$("[data-ctx]").forEach(el => (v[el.dataset.ctx] = el.value));
+      await patchSettings({ context: v });
+      fillSettings();
+    };
+    $("#ctxSave").onclick = guard(async () => { await saveCtx(); $("#ctxSaved").textContent = "Saved."; });
+    $("#ctxSaveSync").onclick = guard(async () => {
+      await saveCtx();
+      await api("POST", "context", { action: "sync" });
+      showView("context");
     });
     $("#agentBtn").onclick = guard(async () => {
       const c = await patchChat({ agent: !(S.chat && S.chat.agent) });
@@ -1362,6 +1389,8 @@
     Projects = window.VAProjects({ api, toast, guard, esc, openModal, closeModal, $, $$, S, showView, patchChat,
       renderChat, renderRail, newChat, currentModel, autosize });
     Java = window.VAJava({ api, toast, guard, esc, openModal, closeModal, $, $$, S }, Projects);
+    Ctx = window.VAContext({ api, toast, guard, esc, openModal, closeModal, $, $$, S, showView, patchChat, renderChat,
+      renderRail, newChat, autosize });
     Api = window.VAApi({ api, toast, guard, esc, openModal, closeModal, $, $$, S, showView, patchChat, renderChat,
       renderRail, newChat, currentModel, autosize, download, Projects });
     wire();

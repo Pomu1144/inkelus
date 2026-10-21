@@ -51,6 +51,7 @@ DEFAULT_SETTINGS = {
         "chrome_path": "",        # empty: find Chrome / Edge / Chromium automatically
         "max_steps": 25,
     },
+    "context": {},                # work context sources: GitHub, Jira, IMAP (see context.DEFAULTS)
 }
 
 
@@ -110,6 +111,7 @@ class Store:
             "model": model or self.settings.get("last_model", ""),
             "browser": False,
             "agent": False,           # may drive the agent browser window
+            "context": False,         # may read the synced work context (PRs, Jira issues, email)
             "project": "",            # id of the code project this chat works on
             "docs": [],               # Library documents shared with the model
             "template": "auto",       # "auto", "" (none) or a template name

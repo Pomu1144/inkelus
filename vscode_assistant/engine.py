@@ -7,7 +7,7 @@ nothing about HTTP or the page.
 """
 import json
 
-from . import agent_browser, net, projects, providers, web
+from . import agent_browser, context, net, projects, providers, web
 
 TOOL_RESULT_LIMIT = 15000
 
@@ -59,6 +59,8 @@ def agent_for(store):
 
 def needs_confirm(store, c, name, preview=None):
     """Whether this tool call needs the user's OK before it runs."""
+    if name in context.TOOL_NAMES:
+        return False   # reads the local copy of the last sync; nothing goes online
     if name in agent_browser.SELF_CONFIRMING:
         return False   # browser_login asks for approval itself, every time, whatever the settings
     if name in projects.TOOL_NAMES:
@@ -79,7 +81,7 @@ def needs_confirm(store, c, name, preview=None):
     return bool(store.settings["web"].get("confirm", True))
 
 
-def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, agent=None, projs=None):
+def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, agent=None, projs=None, work=None):
     """One reply, including any tool round-trips.
 
     emit(kind, *args) is called with:
@@ -92,6 +94,7 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
     sandbox is this chat's web.Sandbox, or None when the web is off.
     agent is the shared agent_browser.AgentBrowser when this chat may drive the browser window.
     projs is the projects.Projects list; the chat's project (if any) gets the coding tools.
+    work() returns the synced work context (context.Graph), read when the chat has Context on.
     """
     prov = providers.create(conn)
     bs = store.settings["web"]
@@ -104,6 +107,8 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
             sandbox.allow_search = bool(bs.get("allow_search", True))
         if c.get("agent") and agent is not None:
             tools = (tools or []) + agent_browser.TOOLS
+        if c.get("context") and work is not None:
+            tools = (tools or []) + context.TOOLS
         proj = projs.for_chat(c) if projs is not None else None
         if proj is not None:
             tools = (tools or []) + projects.TOOLS
@@ -127,6 +132,8 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
                 system = (system + "\n\n" if system else "") + web.SYSTEM_PROMPT
             if tools and agent is not None and c.get("agent"):
                 system = (system + "\n\n" if system else "") + agent_browser.SYSTEM_PROMPT
+            if c.get("context") and work is not None:
+                system = (system + "\n\n" if system else "") + context.SYSTEM_PROMPT
             if proj is not None:
                 system = (system + "\n\n" if system else "") + proj.system_prompt()
             if system:
@@ -164,6 +171,7 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
                     res.update(content="Unknown tool %s." % call["name"], status="error", is_error=True)
                     continue
                 is_agent = call["name"] in agent_browser.TOOL_NAMES
+                is_ctx = call["name"] in context.TOOL_NAMES
                 is_proj = call["name"] in projects.TOOL_NAMES
                 preview = None
                 if is_proj:
@@ -184,7 +192,9 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
                         res["content"] += " Their note: " + c.pop("decline_note")
                     continue
                 try:
-                    if is_agent:
+                    if is_ctx:
+                        text, is_err = work().run(call["name"], call["arguments"]), False
+                    elif is_agent:
                         text, is_err = agent.run(c["id"], call["name"], call["arguments"]), False
                     elif is_proj:
                         if call["name"] in projects.EDITS:
