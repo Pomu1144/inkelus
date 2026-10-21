@@ -222,9 +222,21 @@ PR link or `owner/repo#12` in an email or issue, or a Jira key in an email.
 Key-shaped words like `UTF-8` are ignored, and so is quoted text in replies.
 Linked items form a **thread**.
 
-**The diagram** has one band per thread, with Jira, pull request and email
-columns and lines between linked items (a dashed line joins an issue and an
-email directly). Notes you add get their own column. Hover an item to highlight its links; click it for its
+**The tree** (the default view) shows each thread as an outline, like a
+folder tree. The main Jira issue is at the top, the pull requests that work
+on it are under it, and the emails and notes that discuss each PR are under
+that. Every branch says how the items relate ("worked on in", "discussed in",
+"for", "mentions", "noted", with "by you" on links you drew). Fold or
+unfold branches (big threads start folded), or a whole thread. An item can
+be linked to more than one thing, but it only appears once in the tree. Its
+other links show as small link buttons that jump to the other item. To see a
+thread from another item's point of view, select it and press **Start the
+tree here**.
+
+**Columns** shows the same threads as bands with Jira, pull request and
+email columns and lines between linked items (a dashed line joins an issue
+and an email directly). Notes you add get their own column. Switch views
+with **Tree / Columns** at the top. In either view, hover an item to highlight its links; click it for its
 details, everything linked to it, **Open** (in GitHub or Jira) and **Ask
 about this**. Filter by words, and tick **Unlinked** to see items that don't
 mention anything else. Problems from a sync (a wrong token, a missing repo)

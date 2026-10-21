@@ -5,7 +5,9 @@ window.VAContext = function (app) {
   "use strict";
   const { api, toast, guard, openModal, closeModal, $, $$ } = app;
   const esc = v => app.esc(v == null ? "" : String(v));
-  const C = { graph: null, sources: [], syncing: false, filter: "", loose: false, sel: "", loaded: false };
+  const C = { graph: null, sources: [], syncing: false, filter: "", loose: false, sel: "", loaded: false,
+    mode: "tree", collapsed: new Set(), shut: new Set(), roots: {}, seen: new Set(), parentOf: {} };
+  try { C.mode = localStorage.getItem("va-ctx-mode") || "tree"; } catch (_) { /* private window */ }
   const KINDS = [["jira", "Jira"], ["pr", "Pull requests"], ["mail", "Email"], ["note", "Notes"]];
   const LABEL = { jira: "Jira issue", pr: "Pull request", mail: "Email", note: "Note" };
   const SHORT = { jira: "Jira", pr: "PR", mail: "Email", note: "Note" };
@@ -106,9 +108,22 @@ window.VAContext = function (app) {
       return;
     }
     const threads = g.threads.filter(t => t.some(i => matches(C.byId[i])));
+    $$("#ctxMode .tab").forEach(t => t.classList.toggle("active", t.dataset.mode === C.mode));
+    board.classList.toggle("tree-mode", C.mode === "tree");
     // your own notes always show; other unlinked items only with Unlinked ticked
     const loose = g.loose.filter(i => (C.loose || C.byId[i].kind === "note") && matches(C.byId[i]));
     const hidden = g.loose.filter(i => C.byId[i].kind !== "note").length;
+    if (C.mode === "tree") {
+      const loose2 = g.loose.filter(i => (C.loose || C.byId[i].kind === "note") && matches(C.byId[i]));
+      board.innerHTML = threads.map(treeHTML).join("") +
+        (loose2.length ? '<section class="tthread"><div class="tt-head"><span class="tt-title">' + (C.loose ? "Not linked to anything" : "Your notes that aren't linked yet") +
+          '</span></div><ul class="ttree flat">' + loose2.map(i => "<li>" + rowHTML(i, null, 0, []) + "</li>").join("") + "</ul></section>" : "") +
+        (!threads.length && !loose2.length ? '<p class="faint small pad">' + (C.filter ? "Nothing matches." : hidden ? "No linked items. Tick <b>Unlinked</b> to see the " + hidden + " items that don't mention each other." : "") + "</p>" : "") +
+        (!C.loose && hidden && (threads.length || loose2.length) ? '<p class="faint tiny pad">' + hidden + " item" + (hidden === 1 ? " isn't" : "s aren't") + " linked to anything; tick <b>Unlinked</b> to show them.</p>" : "");
+      if (C.sel) highlight(C.sel, true);
+      renderDetail();
+      return;
+    }
     board.innerHTML = '<div class="cb-head">' + C.kinds.map(([, l]) => "<span>" + l + "</span>").join("") + "</div>" +
       threads.map(t => band(t, threadTitle(t))).join("") +
       (loose.length ? band(loose, C.loose ? "Not linked to anything" : "Your notes that aren't linked yet") : "") +
@@ -116,6 +131,84 @@ window.VAContext = function (app) {
       (!C.loose && hidden && (threads.length || loose.length) ? '<p class="faint tiny pad">' + hidden + " item" + (hidden === 1 ? " isn't" : "s aren't") + " linked to anything; tick <b>Unlinked</b> to show them.</p>" : "");
     requestAnimationFrame(drawLinks);
     renderDetail();
+  }
+
+  // ── the tree: each thread as an outline, from its main issue down ──────
+  const ORDER = { jira: 0, pr: 1, mail: 2, note: 3 };
+  const REL = {
+    "jira>pr": "worked on in", "jira>mail": "discussed in", "jira>note": "noted", "jira>jira": "related to",
+    "pr>jira": "for", "pr>mail": "discussed in", "pr>note": "noted", "pr>pr": "related to",
+    "mail>jira": "mentions", "mail>pr": "mentions", "mail>mail": "related to", "mail>note": "noted",
+    "note>jira": "about", "note>pr": "about", "note>mail": "about", "note>note": "related to",
+  };
+  const threadKey = ids => ids.slice().sort()[0];
+  function buildTree(ids) {
+    const set = new Set(ids), key = threadKey(ids);
+    const deg = i => Array.from(adj[i] || []).filter(j => set.has(j)).length;
+    // the root: the issue everything hangs off (or a PR, or the most-connected item); you can pick another
+    let root = C.roots[key] && set.has(C.roots[key]) ? C.roots[key] : null;
+    if (!root) root = ids.slice().sort((a, b) => (ORDER[C.byId[a].kind] - ORDER[C.byId[b].kind]) || (deg(b) - deg(a)) || a.localeCompare(b))[0];
+    const parent = { [root]: null }, kids = {}, depth = { [root]: 0 }, queue = [root];
+    while (queue.length) {
+      const cur = queue.shift();
+      kids[cur] = Array.from(adj[cur] || []).filter(j => set.has(j) && !(j in parent))
+        .sort((a, b) => (ORDER[C.byId[a].kind] - ORDER[C.byId[b].kind]) || (C.byId[b].updated || "").localeCompare(C.byId[a].updated || ""));
+      kids[cur].forEach(j => { parent[j] = cur; depth[j] = depth[cur] + 1; queue.push(j); });
+    }
+    if (!C.seen.has(key)) {          // big threads start folded below the second level
+      C.seen.add(key);
+      if (ids.length > 12) Object.keys(kids).forEach(i => { if (depth[i] >= 1 && kids[i].length) C.collapsed.add(i); });
+    }
+    Object.assign(C.parentOf, parent);
+    return { root, parent, kids, set };
+  }
+  function rowHTML(i, parentId, depth, kidList, set) {
+    const n = C.byId[i], p = parentId ? C.byId[parentId] : null;
+    const open = !C.collapsed.has(i) || !!C.filter;
+    const rel = p ? REL[p.kind + ">" + n.kind] || "linked to" : "";
+    // links that the tree can't show as branches: shown as small jump buttons
+    const extra = set ? Array.from(adj[i] || []).filter(j => set.has(j) && j !== parentId && C.parentOf[j] !== i) : [];
+    const label = n.kind === "pr" ? n.id.replace(/^[^/]+\//, "") : n.kind === "jira" ? n.id : "";
+    return '<div class="ccard trow k-' + esc(n.kind) + (C.sel === i ? " sel" : "") + (matches(n) ? "" : " miss") + '" data-id="' + esc(i) + '" tabindex="0">' +
+      (kidList.length ? '<button class="twisty" data-tog="' + esc(i) + '" title="' + (open ? "Fold" : "Unfold") + '">' + icon(open ? "chevron-down" : "chevron-right") +
+        (open ? "" : '<span class="kidcount">' + countBelow(i) + "</span>") + "</button>" : '<span class="twisty-gap"></span>') +
+      (rel ? '<span class="rel">' + esc(rel) + (p && isManual(parentId, i) ? ' <b class="byyou" title="You linked these">· by you</b>' : "") + "</span>" : "") +
+      '<span class="tag k-' + esc(n.kind) + '">' + esc(SHORT[n.kind]) + "</span>" +
+      (label ? '<span class="cc-id">' + esc(label) + "</span>" : n.kind === "note" && n.who && n.who !== "note" ? '<span class="cc-id">' + esc(n.who) + "</span>" : "") +
+      '<span class="t-title">' + esc(n.title) + "</span>" +
+      (n.state ? '<span class="cc-state st-' + esc(n.state.replace(/\W+/g, "-")) + '">' + esc(n.state) + "</span>" : "") +
+      (n.who && n.kind !== "note" ? '<span class="t-who">' + esc(n.who) + "</span>" : "") +
+      extra.map(j => '<button class="xlink" data-jump="' + esc(j) + '" title="Also linked to ' + esc(C.byId[j].title) + '">' + icon("link") + esc(C.byId[j].kind === "jira" || C.byId[j].kind === "pr" ? C.byId[j].id.replace(/^[^/]+\//, "") : SHORT[C.byId[j].kind]) + "</button>").join("") +
+      '<span class="cc-when">' + esc(when(n.updated)) + "</span></div>";
+  }
+  let treeCache = null;
+  function countBelow(i) {
+    let c = 0;
+    const walk = x => (treeCache.kids[x] || []).forEach(k => { c++; walk(k); });
+    walk(i);
+    return c;
+  }
+  function treeHTML(ids) {
+    const t = treeCache = buildTree(ids), key = threadKey(ids);
+    const node = (i, depth) => {
+      const kids = t.kids[i] || [], open = !C.collapsed.has(i) || !!C.filter;
+      return "<li>" + rowHTML(i, t.parent[i], depth, kids, t.set) + (kids.length && open ? '<ul class="ttree">' + kids.map(k => node(k, depth + 1)).join("") + "</ul>" : "") + "</li>";
+    };
+    const counts = {};
+    ids.forEach(i => (counts[C.byId[i].kind] = (counts[C.byId[i].kind] || 0) + 1));
+    const words = { jira: ["issue", "issues"], pr: ["pull request", "pull requests"], mail: ["email", "emails"], note: ["note", "notes"] };
+    const shut = C.shut.has(key) && !C.filter;
+    return '<section class="tthread' + (shut ? " shut" : "") + '"><div class="tt-head"><button class="twisty" data-shut="' + esc(key) + '">' + icon(shut ? "chevron-right" : "chevron-down") + "</button>" +
+      '<span class="tt-title">' + esc(threadTitle(ids)) + '</span><span class="faint tiny">' +
+      KINDS.filter(([k]) => counts[k]).map(([k]) => counts[k] + " " + words[k][counts[k] === 1 ? 0 : 1]).join(" · ") + "</span>" +
+      '<span class="tt-acts">' + (C.roots[key] ? '<button class="linkish" data-unroot="' + esc(key) + '">Back to the main item</button>' : "") + '<button class="linkish" data-all="open" data-key="' + esc(key) + '">Unfold all</button><button class="linkish" data-all="fold" data-key="' + esc(key) + '">Fold all</button></span></div>' +
+      (shut ? "" : '<ul class="ttree root">' + node(t.root, 0) + "</ul>") + "</section>";
+  }
+  function threadOf(id) { return C.graph.threads.find(t => t.includes(id)); }
+  function reveal(id) {     // unfold everything above an item so it can be seen
+    const t = threadOf(id);
+    if (t) C.shut.delete(threadKey(t));
+    for (let p = C.parentOf[id]; p; p = C.parentOf[p]) C.collapsed.delete(p);
   }
 
   // lines between linked cards, drawn in each band's own SVG layer
@@ -188,6 +281,7 @@ window.VAContext = function (app) {
       '<div class="row tight">' + (n.url ? '<a class="btn small" href="' + esc(n.url) + '" target="_blank" rel="noopener noreferrer">' + icon("external") + "Open</a>" : "") +
       '<button class="btn small primary" data-a="ask">' + icon("spark") + "Ask about this</button>" +
       '<button class="btn small" data-a="linkto" title="Link this to another item by hand">' + icon("link") + "Link to…</button>" +
+      (C.mode === "tree" && linked.length ? '<button class="btn small" data-a="reroot" title="Redraw this thread\'s tree starting from this item">Start the tree here</button>' : "") +
       (n.kind === "note" ? '<button class="btn small" data-a="edit">' + icon("edit") + 'Edit</button><button class="icon-btn" data-a="delete" title="Delete this note">' + icon("trash") + "</button>"
         : '<button class="btn small" data-a="addnote" title="Add a note linked to this item">' + icon("plus") + "Note</button>") + "</div>" +
       '<div class="cd-text">' + esc(n.text || "(no description)") + "</div>" +
@@ -196,8 +290,9 @@ window.VAContext = function (app) {
         (isManual(n.id, m.id) ? '<button class="icon-btn" data-unlink="' + esc(m.id) + '" title="Remove this link (you added it)">' + icon("close") + "</button>" : "") + "</div>").join("")
         : '<p class="faint small">Not linked to anything else. Use <b>Link to…</b> to connect it by hand.</p>');
   }
-  function select(id) {
-    C.sel = C.sel === id ? "" : id;
+  function select(id, keep) {
+    C.sel = C.sel === id && !keep ? "" : id;
+    if (C.sel && C.mode === "tree" && !$('#ctxBoard .ccard[data-id="' + CSS.escape(C.sel) + '"]')) { reveal(C.sel); render(); }
     $$("#ctxBoard .ccard").forEach(el => el.classList.toggle("sel", el.dataset.id === C.sel));
     highlight(C.sel, !!C.sel);
     renderDetail();
@@ -297,6 +392,23 @@ window.VAContext = function (app) {
   function wire() {
     const board = $("#ctxBoard");
     board.addEventListener("click", e => {
+      const tog = e.target.closest("[data-tog]");
+      if (tog) { const i = tog.dataset.tog; if (C.collapsed.has(i)) C.collapsed.delete(i); else C.collapsed.add(i); render(); return; }
+      const sh = e.target.closest("[data-shut]");
+      if (sh) { const k = sh.dataset.shut; if (C.shut.has(k)) C.shut.delete(k); else C.shut.add(k); render(); return; }
+      const all = e.target.closest("[data-all]");
+      if (all) {
+        const t = C.graph.threads.find(x => threadKey(x) === all.dataset.key) || [];
+        C.shut.delete(all.dataset.key);
+        t.forEach(i => (all.dataset.all === "fold" && i !== (C.roots[all.dataset.key] || "") ? C.collapsed.add(i) : C.collapsed.delete(i)));
+        if (all.dataset.all === "fold") { const r = buildTree(t).root; C.collapsed.delete(r); }
+        render();
+        return;
+      }
+      const ur = e.target.closest("[data-unroot]");
+      if (ur) { delete C.roots[ur.dataset.unroot]; render(); return; }
+      const jump = e.target.closest("[data-jump]");
+      if (jump) { select(jump.dataset.jump, true); return; }
       const c = e.target.closest(".ccard");
       if (c) return select(c.dataset.id);
       if (e.target.closest('[data-a="settings"]')) { app.showView("settings"); const p = $("#ctxSettings"); if (p) p.scrollIntoView(); }
@@ -314,6 +426,7 @@ window.VAContext = function (app) {
       if (b.dataset.a === "close") return select(C.sel);
       if (b.dataset.a === "ask") return askAbout(C.byId[C.sel]);
       if (b.dataset.a === "linkto") return linkDialog(C.sel);
+      if (b.dataset.a === "reroot") { const t = threadOf(C.sel); if (t) C.roots[threadKey(t)] = C.sel; render(); return; }
       if (b.dataset.a === "addnote") return noteDialog(null, C.sel);
       if (b.dataset.a === "edit") return noteDialog(C.byId[C.sel]);
       if (b.dataset.a === "delete") {
@@ -335,7 +448,12 @@ window.VAContext = function (app) {
         '<p class="faint small">Fix them in Settings › Work context, then sync again. Everything else that synced is shown.</p><div class="row end"><button class="btn primary" data-a="close">Close</button></div>');
       d.querySelector('[data-a="close"]').onclick = closeModal;
     });
-    if (window.ResizeObserver) new ResizeObserver(() => { if (app.S.view === "context") drawLinks(); }).observe(board);
+    if (window.ResizeObserver) new ResizeObserver(() => { if (app.S.view === "context" && C.mode !== "tree") drawLinks(); }).observe(board);
+    $$("#ctxMode .tab").forEach(t => (t.onclick = () => {
+      C.mode = t.dataset.mode;
+      try { localStorage.setItem("va-ctx-mode", C.mode); } catch (_) { /* private window */ }
+      render();
+    }));
   }
   wire();
   return { show, onEvent, load, state: C };
