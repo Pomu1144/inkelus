@@ -469,6 +469,17 @@ progress { width: 100%; height: 4px; accent-color: var(--accent); margin-top: 10
 .commit-box { border-top: 1px solid var(--line); padding-top: 8px; }
 .commit-box textarea { resize: vertical; font-size: 13px; }
 .hc { padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.etabs { display: flex; align-items: stretch; border-bottom: 1px solid var(--line); background: var(--panel); overflow-x: auto; flex: none; scrollbar-width: thin; }
+.etab { display: flex; align-items: center; gap: 4px; padding: 5px 4px 5px 12px; font-size: 12.5px; color: var(--dim); cursor: pointer; flex: none; max-width: 220px;
+  border-right: 1px solid var(--line); border-top: 2px solid transparent; }
+.etab > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.etab:hover { color: var(--text); } .etab.active { background: var(--code); color: var(--text); border-top-color: var(--accent); }
+.etab .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2); display: none; margin: 0 2px; }
+.etab.dirty .dot { display: inline-block; } .etab.dirty:hover .dot { display: none; }
+.etab .icon-btn { width: 18px; height: 18px; visibility: hidden; } .etab:hover .icon-btn, .etab.active .icon-btn { visibility: visible; }
+.etab.dirty:not(:hover) .icon-btn { display: none; }
+.ed-host { flex: 1; min-height: 0; position: relative; display: flex; background: var(--code); }
+.ed-host > .monaco-editor { position: absolute !important; inset: 0; }
 .ed-head { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-bottom: 1px solid var(--line); min-height: 40px; }
 .ed-path { font-family: var(--mono); font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ed-acts { margin-left: auto; display: flex; gap: 6px; }
@@ -496,7 +507,11 @@ progress { width: 100%; height: 4px; accent-color: var(--accent); margin-top: 10
 .diffstat { font: 600 12px var(--mono); margin-left: 6px; }
 .diffstat .plus { color: var(--green); } .diffstat .minus { color: var(--red); }
 .term { border-top: 1px solid var(--line); display: flex; flex-direction: column; height: 220px; flex: none; }
-.term.collapsed { height: auto; } .term.collapsed .term-out { display: none; }
+.term { position: relative; }
+.term-grip { position: absolute; left: 0; right: 0; top: -3px; height: 6px; cursor: ns-resize; z-index: 5; }
+.term-grip:hover, .term-grip.drag { background: var(--accent); opacity: .5; }
+.term.collapsed .term-grip { display: none; }
+.term.collapsed { height: auto !important; } .term.collapsed .term-out { display: none; }
 .term-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; }
 .term-head input { flex: 1; font: 12.5px var(--mono); padding: 4px 8px; margin: 0; }
 .term-out { flex: 1; margin: 0; overflow: auto; padding: 6px 12px 10px; font: 12.5px/18px var(--mono); background: var(--code);
@@ -787,6 +802,73 @@ b.m { font: 700 10.5px var(--mono); min-width: 34px; color: var(--dim); }
 .taskbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
 .taskbar .ptype { color: var(--dim); margin-right: 4px; }
 
+/* ── Java in Projects: status bar, bottom panel tabs, Problems, Usages, Outline, Go to type ── */
+.jbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 4px 10px; border-top: 1px solid var(--line); font-size: 12.5px;
+  background: var(--panel); min-height: 30px; }
+.jbar .jseg { display: inline-flex; align-items: center; gap: 8px; }
+.jbar .jseg + .jseg { padding-left: 10px; border-left: 1px solid var(--line); }
+.jbar .jlogo { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; color: var(--dim); }
+.jbar .jok { color: var(--green); } .jbar .jerr, .linkish.jerr { color: var(--red); } .linkish.jwarn { color: #d7b45a; }
+.jbar .linkish { padding: 0; font-size: 12.5px; text-decoration: underline; }
+.jbar .jkeys { margin-left: auto; } .jbar .jerr { overflow-wrap: anywhere; }
+.term-head .ptabs { display: flex; gap: 2px; flex: none; }
+.ptab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--faint); font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase;
+  padding: 3px 8px; cursor: pointer; }
+.ptab:hover { color: var(--text); } .ptab.active { color: var(--text); border-bottom-color: var(--accent); }
+.ptab b { font-weight: 600; color: var(--red); letter-spacing: 0; }
+.term-tools { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+.term-tools input { flex: 1; font: 12.5px var(--mono); padding: 4px 8px; margin: 0; min-width: 0; }
+.panel-tools { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.term-tools:not([hidden]) + .panel-tools { margin-left: 0; }
+.ppane { flex: 1; overflow: auto; font-size: 12.5px; background: var(--code); min-height: 0; }
+.term.collapsed .ppane { display: none; }
+.prow, .urow { display: flex; align-items: center; gap: 8px; padding: 3px 12px; cursor: pointer; min-width: 0; }
+.prow:hover, .urow:hover { background: var(--panel-hi); }
+.prow .pmsg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prow.error > svg.i { color: var(--red); } .prow.warning > svg.i { color: #d7b45a; }
+.ushead { padding: 6px 12px; color: var(--dim); border-bottom: 1px solid var(--line); }
+.ufile { display: flex; align-items: center; gap: 6px; padding: 6px 12px 2px; } .ufile b { font-weight: 600; }
+.urow { padding-left: 30px; } .urow code { font: 12px var(--mono); white-space: pre; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.urow mark { background: color-mix(in srgb, var(--accent) 30%, transparent); color: inherit; border-radius: 2px; }
+.urow .mono { min-width: 32px; text-align: right; }
+.outline { padding: 4px 0; font-size: 12.5px; }
+.orow { display: flex; align-items: center; gap: 6px; padding: 2px 8px; cursor: pointer; white-space: nowrap; min-width: 0; }
+.orow:hover { background: var(--panel-hi); } .orow > span:nth-of-type(1) { overflow: hidden; text-overflow: ellipsis; }
+.orow .faint { overflow: hidden; text-overflow: ellipsis; }
+.orow .k5, .orow .k10, .orow .k11, .orow .k23 { font-weight: 600; } .orow .k6, .orow .k9, .orow .k12 { color: var(--accent-2); }
+.gtlist { display: flex; flex-direction: column; max-height: 50vh; overflow: auto; margin-top: 6px; }
+.gtrow { display: flex; align-items: center; gap: 8px; text-align: left; background: none; border: 0; padding: 6px 8px; border-radius: var(--r-sm); cursor: pointer; font-size: 13px; }
+.gtrow:hover, .gtrow:focus { background: var(--panel-hi); outline: none; }
+.gtrow .faint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.monaco-editor .codelens-decoration a { color: var(--faint) !important; } .monaco-editor .codelens-decoration a:hover { color: var(--accent-2) !important; }
+
+/* ── the debugger: breakpoints in the margin, the paused line, the Debug panel ── */
+.monaco-editor .va-bp { background: #e5534b; border-radius: 50%; width: 10px !important; height: 10px !important; margin: 5px 0 0 5px; cursor: pointer; }
+.monaco-editor .va-bp.cond { background: #e5534b; box-shadow: inset 0 0 0 2px #e8b84b; }
+.monaco-editor .va-curline { background: color-mix(in srgb, #e8b84b 22%, transparent); }
+.monaco-editor .va-curarrow::before { content: ""; display: block; width: 0; height: 0; margin: 4px 0 0 6px; border-left: 9px solid #e8b84b; border-top: 6px solid transparent; border-bottom: 6px solid transparent; }
+.monaco-editor .glyph-margin { cursor: pointer; }
+#debugPane { display: flex; flex-direction: column; }
+#debugPane[hidden] { display: none; }
+.dbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.dbar .dstate { font-size: 12.5px; color: var(--text); margin-left: 6px; } .dbar .tiny { margin-left: auto; }
+.dgrid { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 1.3fr); }
+.dcol { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); } .dcol:last-child { border-right: 0; }
+.dhead { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); padding: 5px 10px; border-bottom: 1px solid var(--line); }
+.dlist { flex: 1; overflow: auto; font-size: 12.5px; }
+.frow { display: flex; flex-direction: column; padding: 4px 10px; cursor: pointer; border-left: 2px solid transparent; }
+.frow:hover { background: var(--panel-hi); } .frow.on { background: var(--sel); border-left-color: #e8b84b; } .frow.ext { opacity: .6; }
+.frow > span:first-child { font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vscope { font-size: 11px; color: var(--faint); padding: 5px 8px 2px; text-transform: uppercase; letter-spacing: .04em; }
+.vrow { display: flex; align-items: center; gap: 6px; padding: 2px 8px; font: 12px var(--mono); cursor: default; min-width: 0; }
+.vrow[data-ref]:not([data-ref="0"]) { cursor: pointer; } .vrow:hover { background: var(--panel-hi); }
+.vtw { width: 12px; flex: none; display: inline-flex; } .vtw svg.i { width: 11px; height: 11px; }
+.vname { color: var(--accent-2); flex: none; } .vname::after { content: " ="; color: var(--faint); }
+.vval { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.dcons { flex: 1; margin: 0; overflow: auto; padding: 6px 10px; font: 12px/17px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.dcons .c-stderr { color: var(--red); } .dcons .c-console { color: var(--faint); } .dcons .c-input { color: var(--accent-2); } .dcons .c-result { color: var(--green); }
+#dEval { margin: 0; border-radius: 0; border-width: 1px 0 0; font: 12.5px var(--mono); padding: 6px 10px; }
+@media (max-width: 1100px) { .dgrid { grid-template-columns: 1fr 1fr; } .dgrid .dcol:last-child { grid-column: 1 / -1; border-top: 1px solid var(--line); } }
 /* ── Context: PRs, Jira issues and email as linked threads ── */
 #view-context { display: flex; flex-direction: column; }
 #view-context .head { padding-bottom: 6px; }

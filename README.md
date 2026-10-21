@@ -122,9 +122,12 @@ Work on your code without opening another editor. **Projects** in the sidebar:
   computer (a repo you cloned), **clone from GitHub** (paste the address), or
   **import a ZIP** (e.g. GitHub's *Download ZIP*). Files are worked on in
   place; nothing is copied or uploaded.
-- **Files**: a file tree (it respects `.gitignore`) and an editor with line
-  numbers, auto-indent and `Ctrl+S` to save. **Ask AI** starts a chat about
-  the open file.
+- **Files**: a file tree (it respects `.gitignore`) and a real code editor
+  (Monaco, the editor inside VS Code, shipped with the app so it works
+  offline): syntax colours for most languages, tabs for several open files
+  (unsaved changes are kept when you switch), find and replace, multiple
+  cursors, a minimap and `Ctrl+S` to save. **Outline** lists the open file's
+  classes and methods. **Ask AI** starts a chat about the open file.
 - **Terminal**: run any command in the project folder (`pytest`, `npm test`,
   `git log`…) and see the output as it arrives. `↑`/`↓` recall earlier
   commands.
@@ -196,6 +199,97 @@ its files stay where they are.
 Coding works best with a model that's good at tool calling, such as
 `qwen2.5-coder:14b`, `qwen3:14b` or larger. Small models (7–8B) manage
 simple fixes but often lose track in multi-step changes.
+
+## Java (like NetBeans)
+
+Open a Maven, Gradle or NetBeans Ant project and the editor understands Java
+the way NetBeans does. The first time, the app downloads the Eclipse Java
+language server (about 50 MB, from eclipse.org) and the Java debugger plugin
+(from Maven Central) into its data folder; the **Java** bar under the editor
+shows the progress, then **Ready**. It needs a JDK 17 or newer to run (21 is
+best); your projects can still target older Java versions. Pick the JDK and
+the memory it may use in **Settings › Java**. Nothing is written into your
+project (no `.classpath`, `.project` or `.settings`).
+
+- **Errors as you type**, underlined in the editor and listed on the
+  **Problems** tab under the editor (click one to jump to it).
+- **Completion** (`Ctrl+Space`) with parameter hints, and **hover** for a
+  class's or method's Javadoc.
+- **Go to definition** (`Ctrl+B`, `F12` or Ctrl+click), also into library
+  classes such as `String` or a jar's classes (shown read-only, decompiled
+  when there's no source). **Go to type** (`Ctrl+O`).
+- **Find usages** (`Alt+F7`), listed on the **Usages** tab by file.
+- **Rename** (`Ctrl+R`) across every file, **Fix imports**
+  (`Ctrl+Shift+I`), **Format** (`Alt+Shift+F`) and **quick fixes**
+  (`Alt+Enter`: add an import, create a method, fix a typo…).
+- **Run test** / **Debug test** links above each JUnit test and test class,
+  **Run** / **Debug** above `main`. Test runs go to the Terminal and the
+  Tests list.
+
+**Debugger.** Click left of a line number (or `F9`) to set a breakpoint;
+right-click one to give it a condition. Then **Debug** a main class (the
+**Debug** button, or the link above `main`) or **Debug test**. When it stops,
+the **Debug** tab shows the call stack, the variables (expand objects and
+lists), and a console where you can evaluate Java expressions; hovering a
+variable in the editor shows its value. NetBeans keys: `F5` continue, `F8`
+step over, `F7` step into, `Ctrl+F7` step out, `Shift+F5` stop (`F10`, `F11`
+and `Shift+F11` work too). A test is debugged through its build tool (Maven
+Surefire, Gradle or NetBeans Ant), so it runs exactly as it does in NetBeans.
+Drag the top edge of the bottom panel to make it taller.
+
+**NetBeans projects.**
+
+- Maven: when `mvn` isn't installed separately, the Maven that comes with
+  NetBeans is used. The **Run** button uses the Run settings NetBeans saved
+  in `nbactions.xml` (main class, arguments, JVM options).
+- Ant (`nbproject/`): the source folders and jars come from
+  `nbproject/project.properties`, and NetBeans' own libraries (such as
+  JUnit) from the IDE's settings that `nbproject/private` points to. Ant
+  itself is found inside NetBeans too.
+
+## TypeScript, JavaScript, React and Angular
+
+TypeScript and JavaScript files (`.ts`, `.tsx`, `.js`, `.jsx`) get the same
+help as Java, from typescript-language-server: the TypeScript compiler's own
+language service, the one VS Code uses. It reads your `tsconfig.json` and
+`node_modules` and uses **your project's own TypeScript**, so the errors match
+what `tsc` and your build report.
+
+The first time you open a project with a `package.json`, press **Set up
+TypeScript support** in the bar under the editor: it installs the language
+servers once with npm into the app's data folder (about 30 MB). It needs
+Node.js 18 or newer; pick which Node in **Settings › TypeScript and
+JavaScript** if it isn't on the PATH.
+
+- **Errors as you type**, the same as `tsc`, and **ESLint** warnings from
+  your project's own ESLint and config, both on the **Problems** tab.
+- **Completion with auto-imports** (pick `cartTotal` and the `import` line
+  is added), hover for types and docs, parameter hints.
+- **Go to definition** (`F12`, `Ctrl+B`), into a library's type definitions
+  in `node_modules` too; **find usages** (`Alt+F7`); **go to type or
+  component** (`Ctrl+O`).
+- **Rename** (`Ctrl+R`) across files, **organize imports**
+  (`Ctrl+Shift+I`), and **quick fixes** (`Alt+Enter`): add a missing import,
+  remove an unused variable, ESLint's fixes and "disable this rule here".
+- **Format** (`Alt+Shift+F`) with your project's **Prettier** and its
+  config when it has Prettier, else TypeScript's formatter.
+- **Run test** links above Vitest and Jest tests (`it`, `test`, `describe`),
+  run in the Terminal and recorded on the Tests list.
+
+**Angular.** In an Angular project the Angular language server runs next to
+TypeScript's and uses your project's own Angular language service:
+
+- **Templates** (`.html` files and inline `template:` strings) get errors as
+  you type (the same as `ng build`), completion of the component's fields
+  and methods, hover, and **go to definition** from the template to the
+  component.
+- **Run the tests in a spec file** with `ng test` (Karma runs whole files;
+  results are shown on the Tests list). Projects using Jest or Vitest get a
+  link per test.
+- Prettier formats templates too when the project has it.
+
+Debugging a React or Angular app in the browser is best done in Chrome's
+DevTools.
 
 ## Context
 
@@ -598,8 +692,14 @@ tool calls.
 - `Enter` sends, `Shift+Enter` adds a new line
 - `Esc` stops generation (or closes a dialog)
 - `Ctrl+S` saves in the Library and Projects editors
-- `Ctrl+B` collapses or expands the sidebar
+- `Ctrl+B` collapses or expands the sidebar (in the code editor it goes to a
+  definition instead)
 - `Tab` / `Shift+Tab` indent and unindent in the Projects editor
+- Java and TypeScript: `Alt+Enter` quick fix, `Ctrl+B` go to definition, `Alt+F7` find
+  usages, `Ctrl+R` rename, `Ctrl+Shift+I` fix imports, `Ctrl+O` go to type,
+  `Alt+Shift+F` format
+- Debugger: `F9` breakpoint, `F5` continue, `F8` step over, `F7` step into,
+  `Ctrl+F7` step out, `Shift+F5` stop
 - `Ctrl+Enter` commits in the commit message box
 - `Ctrl+Enter` sends, `Ctrl+S` saves, `Ctrl+T` opens and `Ctrl+W` closes a request tab in API
 
@@ -611,6 +711,12 @@ vscode_assistant/server.py         local web server + JSON API; opens the app wi
 vscode_assistant/static/           the app's page, styles and scripts
 vscode_assistant/static/vault.js   the encrypted password vault (Web Crypto, in the page)
 vscode_assistant/static/projects.js  the Projects workspace (files, editor, Git, terminal)
+vscode_assistant/static/codeeditor.js  the code editor (Monaco, or a plain text box if it can't load)
+vscode_assistant/static/javaide.js the Java and TypeScript features, and the Java debugger, in the editor
+vscode_assistant/static/vendor/monaco/  the Monaco editor (MIT licence, see its LICENSE and ThirdPartyNotices.txt)
+vscode_assistant/javals.py         the Java tools: finds a JDK, downloads and runs the Eclipse Java language server
+vscode_assistant/javadebug.py      the Java debugger (talks to the java-debug plugin)
+vscode_assistant/tsls.py           TypeScript/JavaScript: typescript-language-server, ESLint, Angular, Prettier, test runners
 vscode_assistant/engine.py         the chat + tool loop
 vscode_assistant/projects.py       projects: file access, the AI's coding tools, commands, undo
 vscode_assistant/context.py        work context: GitHub, Jira and IMAP sync, linking, the model's tools
