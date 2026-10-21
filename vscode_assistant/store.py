@@ -45,6 +45,7 @@ DEFAULT_SETTINGS = {
         "max_steps": 8,
     },
     "groups": [],                 # chat groups in the sidebar: [{"id", "name", "collapsed"}]
+    "projects": [],               # code folders: [{"id", "name", "path", "notes", "allowed_commands", "protected"}]
     "agent": {                    # the agent browser (a real Chrome window the model can drive)
         "confirm": "actions",     # "actions": ask before clicks/typing/opening; "all"; "none"
         "chrome_path": "",        # empty: find Chrome / Edge / Chromium automatically
@@ -109,6 +110,7 @@ class Store:
             "model": model or self.settings.get("last_model", ""),
             "browser": False,
             "agent": False,           # may drive the agent browser window
+            "project": "",            # id of the code project this chat works on
             "docs": [],               # Library documents shared with the model
             "template": "auto",       # "auto", "" (none) or a template name
             "params": {"system": self.settings["defaults"].get("system", ""), "temperature": 0.7,

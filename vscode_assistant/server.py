@@ -26,14 +26,15 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import agent_browser, engine, net, providers, web
+from . import agent_browser, engine, gitops, net, projects, providers, web
 from .library import KINDS, Library
 from .store import Store, new_id
 
+mimetypes.add_type("image/webp", ".webp")   # older Pythons don't know it
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 APP_NAME = "VSCode Assistant"
-MAX_BODY = 40 * 1024 * 1024
+MAX_BODY = 300 * 1024 * 1024    # big enough for a zipped project
 KEY_MASK = "••••••••"
 IDLE_EXIT = 30   # seconds with no open app window before the server stops
 
@@ -44,6 +45,9 @@ class Hub:
     def __init__(self):
         self.store = Store()
         self.library = Library(self.store.dir)
+        self.projects = projects.Projects(self.store)
+        self.projects.tests.publish = self.publish
+        self.projects.library = self.library
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
         self.clients = []           # one queue per open event stream
@@ -143,11 +147,12 @@ class Hub:
             elif kind == "toast":
                 self.publish({"type": "toast", "text": args[0], "bad": True})
 
-        def ask_tool(chat, call, cancel_ev):
+        def ask_tool(chat, call, cancel_ev, preview=None):
             rid = new_id()
             ev = threading.Event()
-            self.confirms[rid] = {"event": ev, "ok": False, "all": False, "chat": chat["id"], "call": call}
-            self.publish({"type": "confirm", "id": rid, "chat_id": chat["id"], "call": call})
+            self.confirms[rid] = {"event": ev, "ok": False, "all": False, "chat": chat["id"], "call": call,
+                                  "preview": preview, "project": chat.get("project") or ""}
+            self.publish({"type": "confirm", "id": rid, "chat_id": chat["id"], "call": call, "preview": preview})
             try:
                 while not ev.wait(0.2):
                     if cancel_ev.is_set():
@@ -162,13 +167,14 @@ class Hub:
 
         agent = engine.agent_for(self.store) if c.get("agent") else None
         threading.Thread(target=engine.run_turn, daemon=True,
-                         args=(self.store, self.library, c, conn, model, cancel, emit, ask_tool, box, agent)).start()
+                         args=(self.store, self.library, c, conn, model, cancel, emit, ask_tool, box, agent,
+                               self.projects)).start()
         self.publish({"type": "chat", "chat": chat_summary(c, self), "messages": c["messages"]})
 
 
 def chat_summary(c, hub):
     return {"id": c["id"], "title": c["title"], "updated": c.get("updated", 0), "model": c.get("model", ""),
-            "busy": c["id"] in hub.streams, "group": c.get("group") or ""}
+            "busy": c["id"] in hub.streams, "group": c.get("group") or "", "project": c.get("project") or ""}
 
 
 def public_settings(s):
@@ -307,7 +313,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         # replay pending confirmations so a reloaded page can still answer them
-        pending = [{"type": "confirm", "id": rid, "chat_id": v["chat"], "call": v.get("call")}
+        pending = [{"type": "confirm", "id": rid, "chat_id": v["chat"], "call": v.get("call"), "preview": v.get("preview")}
                    for rid, v in list(self.hub.confirms.items()) if v.get("call")]
         pending += [{"type": "credential_request", "id": rid, "chat_id": v["chat"], "host": v["host"],
                      "url": v["url"], "fields": v["fields"]} for rid, v in list(self.hub.cred_requests.items())]
@@ -333,6 +339,7 @@ class Handler(BaseHTTPRequestHandler):
         self.ok({"app": APP_NAME, "settings": public_settings(h.store.settings),
                  "chats": [chat_summary(c, h) for c in chats],
                  "library": {k: h.library.names(k) for k in KINDS},
+                 "projects": [h.projects.summary(p) for p in h.projects.all()], "git": bool(gitops.git_path()),
                  "data_dir": h.store.dir, "tools": web.TOOL_NAMES})
 
     def api_search(self, method, parts, query):
@@ -365,7 +372,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.ok({"chat": c, "busy": c["id"] in h.streams})
             if method == "PATCH":
                 b = self.body()
-                for k in ("title", "model", "browser", "agent", "docs", "template", "group"):
+                for k in ("title", "model", "browser", "agent", "docs", "template", "group", "project"):
                     if k in b:
                         c[k] = b[k]
                 if "title" in b:
@@ -445,6 +452,15 @@ class Handler(BaseHTTPRequestHandler):
         if not box:
             return self.ok({"stale": True})
         box["ok"], box["all"] = bool(b.get("ok")), bool(b.get("all"))
+        if box["call"].get("name") in projects.ALWAYS_ASK or box["call"].get("name") == "run_command":
+            box["all"] = False            # pushes and commands are never allowed wholesale
+        if b.get("ok") and b.get("allow_prefix") and box.get("project"):
+            self.hub.projects.allow_command(box["project"], str(b["allow_prefix"]))
+        note = str(b.get("note") or "").strip()
+        if not b.get("ok") and note:
+            c = self.hub.chat(box["chat"])
+            if c is not None:
+                c["decline_note"] = note[:2000]
         box["event"].set()
         return self.ok()
 
@@ -642,6 +658,270 @@ class Handler(BaseHTTPRequestHandler):
             return self.ok()
         return self.fail(405, "Method not allowed")
 
+    def api_fs(self, method, parts, query):
+        """Folders on this computer, for the "open a folder" picker."""
+        return self.ok(projects.list_dirs((query.get("path") or [""])[0]))
+
+    def api_projects(self, method, parts, query):
+        h = self.hub
+        P = h.projects
+        if not parts:
+            if method == "GET":
+                return self.ok({"projects": [P.summary(p) for p in P.all()], "git": bool(gitops.git_path()),
+                                "default_parent": projects.default_parent()})
+            if method == "POST":
+                b = self.body()
+                act = b.get("action")
+                try:
+                    if act == "open":
+                        d = P.add_folder(b.get("path"))
+                    elif act == "clone":
+                        d = P.clone(b.get("url"), b.get("parent"))
+                    elif act == "zip":
+                        d = P.import_zip(b.get("filename"), base64.b64decode(b.get("data") or ""), b.get("parent"))
+                    else:
+                        return self.fail(400, "Unknown action.")
+                except gitops.GitError as e:
+                    return self.fail(400, str(e))
+                return self.ok({"project": P.summary(d), "projects": [P.summary(p) for p in P.all()]})
+            return self.fail(405, "Method not allowed")
+        p = P.get(parts[0])
+        if not p:
+            return self.fail(404, "That project was removed.")
+        sub = parts[1] if len(parts) > 1 else ""
+        if not sub:
+            if method == "PATCH":
+                P.update(p.id, self.body())
+                return self.ok({"project": P.summary(p.data)})
+            if method == "DELETE":   # forget the project; its files stay where they are
+                P.term_stop(p.id)
+                P.remove(p.id)
+                for c in h.store.chats:
+                    if c.get("project") == p.id:
+                        c["project"] = ""
+                h.save_chats()
+                return self.ok()
+            return self.ok({"project": P.summary(p.data)})
+        if not os.path.isdir(p.root):
+            return self.fail(404, "The folder %s isn't there any more. Was it moved or deleted?" % p.root)
+        try:
+            return self.project_action(p, sub, method, query)
+        except projects.ToolError as e:
+            return self.fail(400, str(e))
+        except gitops.GitError as e:
+            return self.fail(409, str(e))
+
+    def project_action(self, p, sub, method, query):
+        h = self.hub
+        P = h.projects
+        arg = lambda k: (query.get(k) or [""])[0]
+        if sub == "files" and method == "GET":
+            return self.ok({"files": p.files(), "root": p.root})
+        if sub == "file":
+            if method == "GET":
+                full = p.resolve(arg("path"), allow_root=False)
+                try:
+                    text, fmt = projects.read_text(full)
+                except projects.ToolError as e:
+                    return self.ok({"path": p.rel(full), "text": None, "reason": str(e)})
+                return self.ok({"path": p.rel(full), "text": text, "crlf": fmt["crlf"],
+                                "mtime": os.path.getmtime(full)})
+            if method == "PUT":
+                b = self.body()
+                full = p.resolve(b.get("path"), allow_root=False)
+                if os.path.isdir(full):
+                    return self.fail(400, "That's a folder.")
+                exists = os.path.isfile(full)
+                if exists and b.get("mtime") and abs(os.path.getmtime(full) - float(b["mtime"])) > 0.001 \
+                        and not b.get("force"):
+                    return self.fail(409, "This file changed on disk since you opened it (maybe the AI or another "
+                                          "program changed it). Reload it, or save again to overwrite.")
+                fmt = projects.read_text(full)[1] if exists else {}
+                if b.get("create") and exists:
+                    return self.fail(409, "%s already exists." % p.rel(full))
+                projects.write_text(full, str(b.get("text") or ""), fmt)
+                return self.ok({"path": p.rel(full), "mtime": os.path.getmtime(full)})
+            if method == "DELETE":
+                full = p.resolve(arg("path"), allow_root=False)
+                if os.path.isfile(full):
+                    os.remove(full)
+                return self.ok()
+        if sub == "git":
+            if method == "GET":
+                if not gitops.git_path():
+                    return self.ok({"is_repo": False, "no_git": True})
+                if not p.is_git():
+                    return self.ok({"is_repo": False})
+                st = gitops.status(p.root)
+                st["branches"] = gitops.branches(p.root)
+                st["remotes"] = gitops.remotes(p.root)
+                st["log"] = gitops.log(p.root, 20)
+                return self.ok(st)
+            b = self.body()
+            op = b.get("op")
+            out = ""
+            if op == "init":
+                gitops.init(p.root)
+            elif op == "fetch":
+                gitops.fetch(p.root)
+            elif op == "pull":
+                out = gitops.pull(p.root, b.get("mode") if b.get("mode") in ("ff", "merge", "rebase") else "ff")
+            elif op == "push":
+                pv = gitops.push(p.root)
+                out = "Pushed %d commit%s to %s/%s." % (len(pv["commits"]), "" if len(pv["commits"]) == 1 else "s",
+                                                        pv["remote"], pv["branch"])
+            elif op == "commit":
+                c = gitops.commit(p.root, b.get("message"), [x for x in b.get("paths") or [] if isinstance(x, str)] or None)
+                out = "Committed %s: %s" % (c["hash"], c["subject"])
+            elif op == "switch":
+                gitops.switch(p.root, b.get("name"), bool(b.get("create")))
+            elif op == "abort":
+                gitops.abort(p.root)
+            elif op == "continue":
+                gitops.finish(p.root)
+            elif op == "discard":
+                rel = p.rel(p.resolve(b.get("path"), allow_root=False))
+                gitops.discard(p.root, rel)
+            else:
+                return self.fail(400, "Unknown Git action.")
+            return self.ok({"output": out.strip()})
+        if sub == "push_preview" and method == "GET":
+            return self.ok(gitops.push_preview(p.root))
+        if sub == "diff" and method == "GET":
+            path = arg("path")
+            if path:
+                full = p.resolve(path, allow_root=False)
+                rel = p.rel(full)
+                st = gitops.status(p.root)
+                f = next((x for x in st["files"] if x["path"] == rel), None)
+                if f and f["code"] == "?":
+                    try:
+                        return self.ok({"diff": gitops.diff(p.root, rel, untracked_text=projects.read_text(full)[0])})
+                    except projects.ToolError as e:
+                        return self.ok({"diff": "", "reason": str(e)})
+                return self.ok({"diff": gitops.diff(p.root, rel)})
+            return self.ok({"diff": gitops.diff(p.root)})
+        if sub == "terminal" and method == "POST":
+            b = self.body()
+            if b.get("stop"):
+                P.term_stop(p.id)
+                return self.ok()
+            return self.ok({"run": P.term_start(p.id, b.get("command"), h.publish, bool(b.get("test")),
+                                                b.get("suggestion") or None)})
+        if sub == "tests":
+            T = P.tests
+            if method == "GET":
+                d = T.get(p.id)
+                return self.ok(dict(d, test_command=p.data.get("test_command", ""), guess=projects.testlog.guess_command(p.root)))
+            b = self.body()
+            act = b.get("action")
+            if act == "add":
+                added = T.suggest(p.id, [b], "you")
+                if not added:
+                    return self.fail(400, "Give the test a title (or it's already on the list).")
+                return self.ok({"suggestion": added[0]})
+            if act == "update":
+                return self.ok({"suggestion": T.update(p.id, b.get("id"), b)})
+            if act == "delete":
+                T.delete(p.id, sid=b.get("id"))
+                return self.ok()
+            if act == "clear_runs":
+                T.delete(p.id, runs=True)
+                return self.ok()
+            if act == "suggest":
+                return self.ok({"added": T.suggest(p.id, self.suggest_tests(p, b), "ai")})
+            return self.fail(400, "Unknown Tests action.")
+        if sub == "undo" and method == "POST":
+            return self.ok({"path": P.undo(self.body().get("change"))})
+        if sub == "commit_message" and method == "POST":
+            return self.ok({"message": self.commit_message(p, self.body())})
+        return self.fail(404, "Unknown project action")
+
+    def ask_model(self, b, prompt):
+        """One quick, non-streaming answer from the current model (Fast mode, no tools)."""
+        h = self.hub
+        model = b.get("model") or h.store.settings.get("last_model")
+        cid, name = engine.split_model(model)
+        conn = h.store.conn(cid)
+        if not conn:
+            raise ValueError("Pick a model in Settings first.")
+        out = []
+        providers.create(conn).chat(name, [{"role": "user", "content": prompt}], {"temperature": 0.2, "fast": True},
+                                    lambda t, th: out.append(t), threading.Event())
+        return "".join(out).split("</think>")[-1].strip()
+
+    def suggest_tests(self, p, b):
+        """Ask the model which tests are missing, from the project's layout, its test files and recent changes."""
+        tree, _ = p.outline(120)
+        files = p.files()
+        tests = [f for f in files if projects.re.search(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_|_test\.|\.(test|spec)\.", f)]
+        changed = ""
+        if gitops.git_path() and p.is_git():
+            try:
+                changed = projects.clip(gitops.diff(p.root), 6000)
+            except gitops.GitError:
+                pass
+        samples = []
+        for f in [x for x in files if x not in tests and projects.re.search(r"\.(py|js|ts|tsx|jsx|go|rs|java|cs|rb|php|kt|swift)$", x)][:6]:
+            try:
+                samples.append("--- %s\n%s" % (f, projects.read_text(projects.os.path.join(p.root, f))[0][:2500]))
+            except projects.ToolError:
+                pass
+        have = [s["title"] for s in self.hub.projects.tests.get(p.id)["suggested"]]
+        prompt = ("You review a code project and list tests that are missing or worth running. Reply with 3 to 8 lines, "
+                  "each exactly in this form and nothing else:\nTEST: <what to test> | <why it matters, one sentence> | "
+                  "<file the test belongs in>\n\nProject layout:\n" + tree +
+                  "\n\nExisting test files: " + (", ".join(tests[:60]) or "none") +
+                  ("\n\nAlready suggested (don't repeat): " + "; ".join(have[:40]) if have else "") +
+                  ("\n\nUncommitted changes:\n" + changed if changed.strip() else "") +
+                  "\n\nSome source files:\n" + "\n\n".join(samples))
+        items = []
+        for line in self.ask_model(b, prompt).splitlines():
+            line = line.strip().lstrip("-*0123456789. ").strip()
+            if line.upper().startswith("TEST:"):
+                line = line[5:]
+            parts = [x.strip().strip("`") for x in line.split("|")]
+            if len(parts) >= 2 and parts[0]:
+                items.append({"title": parts[0], "why": parts[1], "file": parts[2] if len(parts) > 2 else ""})
+        if not items:
+            raise ValueError("The model didn't suggest any tests in a form the app understands. Try again or another model.")
+        return items
+
+    def commit_message(self, p, b):
+        """Ask the current model for a commit message describing the uncommitted changes."""
+        h = self.hub
+        model = b.get("model") or h.store.settings.get("last_model")
+        cid, name = engine.split_model(model)
+        conn = h.store.conn(cid)
+        if not conn:
+            raise ValueError("Pick a model in Settings first.")
+        paths = [x for x in b.get("paths") or [] if isinstance(x, str)]
+        st = gitops.status(p.root)
+        files = [f for f in st["files"] if not paths or f["path"] in paths]
+        if not files:
+            raise ValueError("There are no changes to describe.")
+        parts = []
+        for f in files[:40]:
+            if f["code"] == "?":
+                try:
+                    parts.append(gitops.diff(p.root, f["path"], untracked_text=projects.read_text(
+                        os.path.join(p.root, f["path"]))[0]))
+                except projects.ToolError:
+                    parts.append("new binary file " + f["path"])
+            else:
+                parts.append(gitops.diff(p.root, f["path"]))
+        diff = projects.clip("\n".join(parts), 14000)
+        prompt = ("Write a Git commit message for these changes. First line: a short summary in the imperative "
+                  "mood, at most 60 characters, no full stop. If the change needs it, add a blank line and a few "
+                  "short bullet points. Reply with only the message, no code fences.\n\n" + diff)
+        out = []
+        cancel = threading.Event()
+        providers.create(conn).chat(name, [{"role": "user", "content": prompt}],
+                                    {"temperature": 0.2, "fast": True}, lambda t, th: out.append(t), cancel)
+        text = "".join(out).strip()
+        text = text.split("</think>")[-1].strip().strip("`").strip()
+        return text
+
     def api_agent(self, method, parts, query):
         """Open the agent browser window, e.g. so the user can log in to sites first."""
         if method == "POST" and parts == ["open"]:
@@ -669,13 +949,21 @@ class Handler(BaseHTTPRequestHandler):
                 with open(p, "wb") as f:
                     f.write(base64.b64decode(b.get("data") or ""))
                 stored = lib.import_file(kind, p)
+                if kind == "standards":   # an uploaded standard is in force straight away
+                    lib.set_meta(stored, {"use_for": os.path.splitext(stored)[0], "files": "", "active": True})
             finally:
                 shutil.rmtree(tmpdir, ignore_errors=True)
             return self.ok({"name": stored, "names": lib.names(kind)})
         if method == "GET":
             if name:
-                return self.ok({"name": name, "text": lib.read(kind, name)})
-            return self.ok({"names": lib.names(kind), "folder": lib.dir(kind)})
+                out = {"name": name, "text": lib.read(kind, name)}
+                if kind == "standards":
+                    out["meta"] = lib.meta(name)
+                return self.ok(out)
+            out = {"names": lib.names(kind), "folder": lib.dir(kind)}
+            if kind == "standards":
+                out["metas"] = {n: lib.meta(n) for n in out["names"]}
+            return self.ok(out)
         if method == "PUT":
             b = self.body()
             old, new = b.get("old") or "", b.get("name") or ""
@@ -683,6 +971,8 @@ class Handler(BaseHTTPRequestHandler):
                 new = lib.rename(kind, old, new)
                 self.rename_in_chats(kind, old, new)
             stored = lib.save(kind, new, b.get("text") or "")
+            if kind == "standards":
+                lib.set_meta(stored, b.get("meta") if isinstance(b.get("meta"), dict) else lib.meta(stored))
             return self.ok({"name": stored, "names": lib.names(kind)})
         if method == "DELETE" and name:
             lib.delete(kind, name)
@@ -786,7 +1076,8 @@ def serve(port=8765, open_page=True, app_window=True, idle_exit=True):
                 time.sleep(5)
                 with hub.lock:
                     idle = hub.seen_client and not hub.clients and time.time() - hub.last_client > IDLE_EXIT
-                if idle and not hub.streams and not hub.pulls:
+                busy_term = any(t["proc"].poll() is None for t in hub.projects.terms.values())
+                if idle and not hub.streams and not hub.pulls and not busy_term:
                     say("All app windows closed; stopping.")
                     httpd.shutdown()
                     return
