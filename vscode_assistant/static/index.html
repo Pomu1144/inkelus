@@ -160,9 +160,11 @@
         <div class="tools">
           <label class="picker"><span>PROJECT</span><select id="apiProject"></select></label>
           <label class="picker"><span>ENVIRONMENT</span><select id="apiEnv"></select></label>
-          <button class="btn" id="apiEnvEdit">Environments</button>
+          <button class="btn" id="apiEnvEdit" title="Environments and globals">Variables</button>
           <button class="btn" id="apiImport">Import</button>
-          <button class="btn primary" id="apiNew"><i data-icon="plus"></i>New request</button>
+          <button class="btn" id="apiCookies">Cookies</button>
+          <button class="btn" id="apiSettings" title="Timeouts, certificates, proxy">Settings</button>
+          <button class="btn primary" id="apiNew"><i data-icon="plus"></i>New</button>
         </div>
       </header>
       <div class="api-server" id="apiServer" hidden></div>
@@ -173,25 +175,12 @@
             <button class="tab" data-aside="history">History</button>
             <button class="tab" data-aside="endpoints" id="apiEndpTab">Endpoints</button>
           </div>
+          <div class="api-filter"><input id="apiFilter" type="search" placeholder="Filter"></div>
           <div class="api-list" id="apiSide"></div>
         </aside>
         <div class="api-main">
-          <div class="req-line">
-            <select id="reqMethod" aria-label="Method"></select>
-            <input id="reqUrl" spellcheck="false" placeholder="{{baseUrl}}/api/users   (or paste a curl command)">
-            <button class="btn primary" id="reqSend" title="Send (Ctrl+Enter)"><i data-icon="play"></i>Send</button>
-            <button class="btn" id="reqSave" title="Save (Ctrl+S)">Save</button>
-          </div>
-          <div class="req-meta"><input id="reqName" spellcheck="false" aria-label="Request name"><span class="faint small" id="reqWhere"></span></div>
-          <div class="tabs req-tabs">
-            <button class="tab" data-rtab="params">Params <b></b></button>
-            <button class="tab" data-rtab="headers">Headers <b></b></button>
-            <button class="tab" data-rtab="body">Body <b></b></button>
-            <button class="tab" data-rtab="auth">Auth <b></b></button>
-            <button class="tab" data-rtab="checks">Checks <b></b></button>
-          </div>
-          <div class="req-pane" id="reqPane"></div>
-          <div class="res-box" id="resBox"></div>
+          <div class="tabstrip" id="apiTabs"></div>
+          <div class="api-editor" id="apiEditor"></div>
         </div>
       </div>
     </section>

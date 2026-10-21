@@ -99,7 +99,7 @@
 
   function handleEvent(ev) {
     if (Projects && (ev.type === "term" || ev.type === "term_done" || ev.type === "chat" || ev.type === "tests")) Projects.onEvent(ev);
-    if (Api && (ev.type === "server" || ev.type === "server_log")) Api.onEvent(ev);
+    if (Api && ["server", "server_log", "script", "api_progress", "oauth", "rt", "rt_closed"].includes(ev.type)) Api.onEvent(ev);
     if (ev.type === "delta") {
       if (S.chat && ev.chat_id === S.chat.id) {
         S.chat.messages[ev.index] = ev.message;

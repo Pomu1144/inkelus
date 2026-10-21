@@ -9,6 +9,7 @@ Environments hold {{variables}}. A variable marked secret is never shown to the 
 """
 import base64
 import json
+import mimetypes
 import os
 import re
 import shlex
@@ -35,21 +36,81 @@ MASK = "••••••"
 # ── storage ──────────────────────────────────────────────────────────────
 def blank_request(name="New request", method="GET", url=""):
     return {"id": new_id(), "name": name, "method": method, "url": url, "params": [], "headers": [],
-            "body": {"mode": "none", "text": "", "form": []}, "auth": {"type": "none"}, "checks": []}
+            "body": {"mode": "none", "text": "", "form": []}, "auth": {"type": "inherit"}, "checks": [],
+            "pre_script": "", "test_script": "", "settings": {}}
+
+
+def blank_collection(name, project=""):
+    return {"id": new_id(), "name": name, "project": project, "items": [], "auth": {"type": "none"}, "variables": [],
+            "pre_script": "", "test_script": "", "description": ""}
+
+
+def migrate(col):
+    """Older collections had a flat "requests" list; now it's a tree of folders and requests."""
+    if "items" not in col:
+        col["items"] = col.pop("requests", [])
+    col.pop("requests", None)
+    for k, v in (("auth", {"type": "none"}), ("variables", []), ("pre_script", ""), ("test_script", ""), ("description", "")):
+        col.setdefault(k, v)
+    return col
+
+
+# ── the collection tree ─────────────────────────────────────────────────
+def walk(items, parents=()):
+    """(node, [ancestor folders]) for every folder and request, depth first."""
+    for it in items or []:
+        yield it, list(parents)
+        if it.get("folder"):
+            yield from walk(it.get("items"), list(parents) + [it])
+
+
+def requests_in(node):
+    """Every request under a collection or folder, in order."""
+    return [n for n, _ in walk(node.get("items")) if not n.get("folder")]
+
+
+def find(col, item_id):
+    """(node, chain) where chain is [collection, folders…, node]; (None, [col]) if absent."""
+    for n, parents in walk(col.get("items")):
+        if n.get("id") == item_id:
+            return n, [col] + parents + [n]
+    return None, [col]
+
+
+def effective_auth(chain):
+    """The auth a request really uses: its own, or the nearest folder's or the collection's."""
+    for node in reversed(chain):
+        a = node.get("auth") or {}
+        if a.get("type") and a["type"] != "inherit":
+            return a
+    return {"type": "none"}
+
+
+def hashlib_id(text):
+    import hashlib
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
 
 
 class Store:
     def __init__(self, data_dir):
+        self.dir = data_dir
         self.path = os.path.join(data_dir, "api.json")
+        self.files_dir = os.path.join(data_dir, "api-files")
         self.lock = threading.RLock()
         try:
             with open(self.path, encoding="utf-8") as f:
                 self.data = json.load(f)
         except (OSError, ValueError):
             self.data = {}
-        for k, v in (("collections", []), ("environments", []), ("active_env", {}), ("history", [])):
+        for k, v in (("collections", []), ("environments", []), ("active_env", {}), ("history", []), ("globals", {}),
+                     ("tokens", {}), ("settings", {})):
             if not isinstance(self.data.get(k), type(v)):
                 self.data[k] = v
+        for c in self.data["collections"]:
+            migrate(c)
+        self.jars = {}
+        self.shared = {}          # collection id -> collection loaded from a project's .api folder
+        self.shared_files = {}    # file path -> (mtime, collection)
 
     def save(self):
         with self.lock:
@@ -58,28 +119,96 @@ class Store:
                 json.dump(self.data, f, ensure_ascii=False)
             os.replace(tmp, self.path)
             try:
-                os.chmod(self.path, 0o600)       # environments can hold tokens
+                os.chmod(self.path, 0o600)       # environments and tokens can be secret
             except OSError:
                 pass
 
-    def scope(self, project):
+    def settings(self):
+        s = {"timeout_ms": 30000, "follow": True, "verify": True, "proxy": "", "cert": "", "key": "", "cookies": True}
+        s.update(self.data.get("settings") or {})
+        return s
+
+    def scope(self, project, root=None):
         """Collections and environments for a project ("" = global), plus the global ones."""
         p = project or ""
         cols = [c for c in self.data["collections"] if c.get("project", "") in (p, "")]
+        if root:
+            cols = self.load_shared(p, root) + cols
         envs = [e for e in self.data["environments"] if e.get("project", "") in (p, "")]
         hist = [h for h in self.data["history"] if h.get("project", "") == p][:MAX_HISTORY]
         return {"collections": cols, "environments": envs, "active_env": self.data["active_env"].get(p, ""),
-                "history": hist}
+                "history": hist, "globals": self.data["globals"].get(p, []), "settings": self.settings()}
 
     def collection(self, cid):
-        return next((c for c in self.data["collections"] if c["id"] == cid), None)
+        return next((c for c in self.data["collections"] if c["id"] == cid), None) or self.shared.get(cid)
 
-    def find_request(self, rid):
-        for c in self.data["collections"]:
-            for r in c["requests"]:
-                if r["id"] == rid:
-                    return c, r
-        return None, None
+    # collections kept in a project's .api folder (Postman format), so the team gets them through Git
+    def load_shared(self, project, root):
+        folder = os.path.join(root, ".api")
+        out = []
+        try:
+            names = sorted(n for n in os.listdir(folder) if n.endswith(".postman_collection.json"))
+        except OSError:
+            names = []
+        for n in names:
+            path = os.path.join(folder, n)
+            try:
+                mtime = os.path.getmtime(path)
+                cached = self.shared_files.get(path)
+                if cached and cached[0] == mtime:
+                    col = cached[1]
+                else:
+                    with open(path, encoding="utf-8") as f:
+                        doc = json.load(f)
+                    col = from_postman(doc)[0]
+                    pid = (doc.get("info") or {}).get("_postman_id") or ""
+                    col["id"] = pid if re.fullmatch(r"[0-9a-f]{12}", pid) else hashlib_id(path)
+                    self.shared_files[path] = (mtime, col)
+                col.update(project=project, location="project", file=os.path.relpath(path, root).replace(os.sep, "/"), root=root)
+                self.shared[col["id"]] = col
+                out.append(col)
+            except (OSError, ValueError) as e:
+                out.append({"id": hashlib_id(path), "name": n, "project": project, "location": "project", "items": [],
+                            "error": "Couldn't read %s: %s" % (n, e), "auth": {"type": "none"}, "variables": []})
+        return out
+
+    def persist(self, col):
+        """Save a collection where it lives: the app's data, or its file in the project."""
+        if col.get("location") == "project" and col.get("root"):
+            path = os.path.join(col["root"], *col["file"].split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            doc = to_postman(col)
+            doc["info"]["_postman_id"] = col["id"]
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(doc, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+            self.shared_files[path] = (os.path.getmtime(path), col)
+        else:
+            self.save()
+
+    def move(self, col, to, root=None):
+        """Move a collection into the project's .api folder (shared through Git) or back into the app."""
+        with self.lock:
+            if to == "project":
+                if not root:
+                    raise ValueError("Pick a project first.")
+                slug = re.sub(r"[^\w.-]+", "-", col["name"]).strip("-.") or "collection"
+                col.update(location="project", root=root, file=".api/%s.postman_collection.json" % slug)
+                self.persist(col)
+                self.data["collections"] = [c for c in self.data["collections"] if c["id"] != col["id"]]
+                self.shared[col["id"]] = col
+                self.save()
+            else:
+                path = os.path.join(col["root"], *col["file"].split("/")) if col.get("root") else None
+                for k in ("location", "file", "root"):
+                    col.pop(k, None)
+                self.shared.pop(col["id"], None)
+                self.data["collections"].append(col)
+                self.save()
+                if path and os.path.exists(path):
+                    os.remove(path)
+                    self.shared_files.pop(path, None)
+        return col
 
     def env(self, project):
         eid = self.data["active_env"].get(project or "", "")
@@ -96,9 +225,52 @@ class Store:
             self.save()
         return item
 
+    # cookies: one jar per project, kept between runs like a browser
+    def jar(self, project):
+        import http.cookiejar
+        p = project or "_global"
+        if p not in self.jars:
+            os.makedirs(os.path.join(self.dir, "cookies"), exist_ok=True)
+            j = http.cookiejar.LWPCookieJar(os.path.join(self.dir, "cookies", re.sub(r"\W", "_", p) + ".txt"))
+            try:
+                j.load(ignore_discard=True)
+            except (OSError, http.cookiejar.LoadError):
+                pass
+            self.jars[p] = j
+        return self.jars[p]
+
+    def save_jar(self, project):
+        j = self.jars.get(project or "_global")
+        if j is not None:
+            try:
+                j.save(ignore_discard=True)
+            except OSError:
+                pass
+
+    # files attached to form-data and binary bodies
+    def add_file(self, name, data):
+        os.makedirs(self.files_dir, exist_ok=True)
+        fid = new_id()
+        with open(os.path.join(self.files_dir, fid), "wb") as f:
+            f.write(data)
+        return {"id": fid, "name": os.path.basename(name or "file"), "size": len(data)}
+
+    def read_file(self, fid):
+        if not re.fullmatch(r"[0-9a-f]{12}", fid or ""):
+            raise ValueError("Unknown file.")
+        try:
+            with open(os.path.join(self.files_dir, fid), "rb") as f:
+                return f.read()
+        except OSError:
+            raise ValueError("The file attached to this request is gone; choose it again.")
+
 
 # ── variables ────────────────────────────────────────────────────────────
 VAR = re.compile(r"\{\{\s*([\w.$-]+)\s*\}\}")
+
+
+def kv_dict(rows):
+    return {r["key"]: str(r.get("value") or "") for r in rows or [] if r.get("enabled", True) and r.get("key")}
 
 
 def variables(env):
@@ -119,10 +291,12 @@ def fill(text, vals, missing=None):
             return str(int(time.time()))
         if k == "$isoTimestamp":
             return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        if k == "$uuid" or k == "$guid":
+        if k in ("$uuid", "$guid", "$randomUUID"):
             return str(uuid.uuid4())
         if k == "$randomInt":
             return str(int.from_bytes(os.urandom(2), "big") % 1000)
+        if k == "$randomEmail":
+            return "user%d@example.com" % (int.from_bytes(os.urandom(2), "big") % 100000)
         if k in vals:
             return vals[k]
         if missing is not None:
@@ -139,56 +313,221 @@ def mask(text, secrets):
 
 
 # ── building and sending a request ───────────────────────────────────────
-def build(req, vals):
-    """The concrete request: method, URL (with params and API-key auth), headers and body bytes."""
+class NeedsToken(Exception):
+    """OAuth 2.0 authorization code flow: the user has to sign in in a browser window first."""
+
+
+def build(req, vals, auth=None, store=None, files=None):
+    """The concrete request: method, URL (with params), headers and body bytes, with auth applied.
+    auth: the effective auth (inherited); defaults to the request's own. store: for OAuth tokens and files."""
     missing = set()
+    f = lambda s: fill(s, vals, missing)
     method = (req.get("method") or "GET").upper()
-    url = fill(req.get("url", ""), vals, missing).strip()
+    url = f(req.get("url", "")).strip()
+    pv = {p.get("key"): f(p.get("value")) for p in req.get("path_vars") or [] if p.get("key")}
+    if pv:      # Postman-style path variables: /users/:id
+        url = re.sub(r"(?<=/):([A-Za-z_]\w*)", lambda m: urllib.parse.quote(pv[m.group(1)], safe="") if m.group(1) in pv else m.group(0), url)
     if url and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
         url = "http://" + url
-    pairs = [(fill(p.get("key"), vals, missing), fill(p.get("value"), vals, missing))
-             for p in req.get("params") or [] if p.get("enabled", True) and p.get("key")]
-    headers = []
-    for h in req.get("headers") or []:
-        if h.get("enabled", True) and h.get("key"):
-            headers.append((fill(h["key"], vals, missing).strip(), fill(h.get("value"), vals, missing)))
-    auth = req.get("auth") or {}
+    pairs = [(f(p.get("key")), f(p.get("value"))) for p in req.get("params") or [] if p.get("enabled", True) and p.get("key")]
+    headers = [(f(h["key"]).strip(), f(h.get("value"))) for h in req.get("headers") or [] if h.get("enabled", True) and h.get("key")]
+    auth = auth if auth is not None else (req.get("auth") or {})
     t = auth.get("type", "none")
+    digest = None
     if t == "bearer" and auth.get("token"):
-        headers.append(("Authorization", "Bearer " + fill(auth["token"], vals, missing)))
+        headers.append(("Authorization", "Bearer " + f(auth["token"])))
     elif t == "basic":
-        raw = "%s:%s" % (fill(auth.get("username"), vals, missing), fill(auth.get("password"), vals, missing))
+        raw = "%s:%s" % (f(auth.get("username")), f(auth.get("password")))
         headers.append(("Authorization", "Basic " + base64.b64encode(raw.encode()).decode()))
     elif t == "apikey" and auth.get("key"):
-        k, v = fill(auth["key"], vals, missing), fill(auth.get("value"), vals, missing)
-        if auth.get("in") == "query":
-            pairs.append((k, v))
-        else:
-            headers.append((k, v))
+        k, v = f(auth["key"]), f(auth.get("value"))
+        (pairs if auth.get("in") == "query" else headers).append((k, v))
+    elif t == "digest":
+        digest = (f(auth.get("username")), f(auth.get("password")))
+    elif t == "oauth2":
+        tok = oauth_token(store, auth, vals) if store is not None else None
+        if tok:
+            if auth.get("add_to") == "query":
+                pairs.append(("access_token", tok))
+            else:
+                headers.append(("Authorization", (f(auth.get("prefix")) or "Bearer") + " " + tok))
     if pairs:
         url += ("&" if "?" in url else "?") + urllib.parse.urlencode(pairs)
     body = req.get("body") or {}
     mode = body.get("mode", "none")
     data = None
     has = {k.lower() for k, _ in headers}
+
+    def ctype(v):
+        if "content-type" not in has:
+            headers.append(("Content-Type", v))
     if mode == "json":
-        data = fill(body.get("text"), vals, missing).encode()
-        if "content-type" not in has:
-            headers.append(("Content-Type", "application/json"))
+        data = f(body.get("text")).encode()
+        ctype("application/json")
     elif mode == "text":
-        data = fill(body.get("text"), vals, missing).encode()
-        if "content-type" not in has:
-            headers.append(("Content-Type", "text/plain; charset=utf-8"))
+        data = f(body.get("text")).encode()
+        ctype(body.get("content_type") or "text/plain; charset=utf-8")
+    elif mode == "xml":
+        data = f(body.get("text")).encode()
+        ctype("application/xml")
     elif mode == "form":
-        data = urllib.parse.urlencode([(fill(f.get("key"), vals, missing), fill(f.get("value"), vals, missing))
-                                       for f in body.get("form") or [] if f.get("enabled", True) and f.get("key")]).encode()
-        if "content-type" not in has:
-            headers.append(("Content-Type", "application/x-www-form-urlencoded"))
+        data = urllib.parse.urlencode([(f(x.get("key")), f(x.get("value"))) for x in body.get("form") or []
+                                       if x.get("enabled", True) and x.get("key")]).encode()
+        ctype("application/x-www-form-urlencoded")
+    elif mode == "multipart":
+        boundary = "----VSCodeAssistant" + uuid.uuid4().hex
+        parts = []
+        for x in body.get("form") or []:
+            if not x.get("enabled", True) or not x.get("key"):
+                continue
+            name = f(x["key"]).replace('"', "%22")
+            if x.get("type") == "file":
+                if not (x.get("file") or {}).get("id"):
+                    continue
+                content = (files or (lambda i: store.read_file(i)))(x["file"]["id"])
+                fname = (x["file"].get("name") or "file").replace('"', "%22")
+                ct = x.get("content_type") or mimetypes.guess_type(fname)[0] or "application/octet-stream"
+                parts.append(('--%s\r\nContent-Disposition: form-data; name="%s"; filename="%s"\r\nContent-Type: %s\r\n\r\n'
+                              % (boundary, name, fname, ct)).encode() + content + b"\r\n")
+            else:
+                parts.append(('--%s\r\nContent-Disposition: form-data; name="%s"\r\n\r\n' % (boundary, name)).encode()
+                             + f(x.get("value")).encode() + b"\r\n")
+        data = b"".join(parts) + ("--%s--\r\n" % boundary).encode()
+        headers = [(k, v) for k, v in headers if k.lower() != "content-type"]
+        headers.append(("Content-Type", "multipart/form-data; boundary=" + boundary))
+    elif mode == "binary":
+        fid = (body.get("file") or {}).get("id")
+        if fid:
+            data = (files or (lambda i: store.read_file(i)))(fid)
+            ctype(mimetypes.guess_type(body["file"].get("name") or "")[0] or "application/octet-stream")
+    elif mode == "graphql":
+        variables_text = f(body.get("variables") or "").strip()
+        try:
+            gvars = json.loads(variables_text) if variables_text else {}
+        except ValueError:
+            raise ValueError("The GraphQL variables aren't valid JSON.")
+        data = json.dumps({"query": f(body.get("query")), "variables": gvars}).encode()
+        ctype("application/json")
     if "user-agent" not in has:
         headers.append(("User-Agent", "VSCodeAssistant-API/1.0"))
     if "accept" not in has:
         headers.append(("Accept", "*/*"))
-    return {"method": method, "url": url, "headers": headers, "data": data, "missing": sorted(missing)}
+    if t == "awsv4":
+        headers = sigv4(method, url, headers, data or b"", {k: f(auth.get(k)) for k in
+                        ("access_key", "secret_key", "session_token", "region", "service")})
+    return {"method": method, "url": url, "headers": headers, "data": data, "missing": sorted(missing), "digest": digest}
+
+
+def sigv4(method, url, headers, payload, cfg):
+    """AWS Signature Version 4: adds X-Amz-Date, x-amz-content-sha256 and Authorization."""
+    import hashlib
+    import hmac
+    if not cfg.get("access_key") or not cfg.get("secret_key"):
+        raise ValueError("AWS signature: set the access key and secret key.")
+    u = urllib.parse.urlsplit(url)
+    region = cfg.get("region") or "us-east-1"
+    service = cfg.get("service") or "execute-api"
+    now = time.gmtime()
+    amz_date, day = time.strftime("%Y%m%dT%H%M%SZ", now), time.strftime("%Y%m%d", now)
+    phash = hashlib.sha256(payload).hexdigest()
+    hdrs = [(k, v) for k, v in headers if k.lower() not in ("x-amz-date", "x-amz-content-sha256", "authorization")]
+    hdrs += [("X-Amz-Date", amz_date), ("x-amz-content-sha256", phash)]
+    if cfg.get("session_token"):
+        hdrs.append(("X-Amz-Security-Token", cfg["session_token"]))
+    canon = {"host": u.netloc}
+    for k, v in hdrs:
+        if k.lower() not in ("user-agent", "accept"):
+            canon[k.lower()] = " ".join(str(v).split())
+    signed = ";".join(sorted(canon))
+    q = sorted(urllib.parse.parse_qsl(u.query, keep_blank_values=True))
+    cq = "&".join("%s=%s" % (urllib.parse.quote(k, safe="-_.~"), urllib.parse.quote(v, safe="-_.~")) for k, v in q)
+    creq = "\n".join([method, urllib.parse.quote(u.path or "/", safe="/-_.~"), cq,
+                      "".join("%s:%s\n" % (k, canon[k]) for k in sorted(canon)), signed, phash])
+    scope = "%s/%s/%s/aws4_request" % (day, region, service)
+    sts = "\n".join(["AWS4-HMAC-SHA256", amz_date, scope, hashlib.sha256(creq.encode()).hexdigest()])
+    key = ("AWS4" + cfg["secret_key"]).encode()
+    for part in (day, region, service, "aws4_request"):
+        key = hmac.new(key, part.encode(), hashlib.sha256).digest()
+    sig = hmac.new(key, sts.encode(), hashlib.sha256).hexdigest()
+    hdrs.append(("Authorization", "AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s"
+                 % (cfg["access_key"], scope, signed, sig)))
+    return hdrs
+
+
+# ── OAuth 2.0 ────────────────────────────────────────────────────────────
+def _token_key(auth, vals):
+    import hashlib
+    parts = [fill(auth.get(k), vals) for k in ("grant", "token_url", "client_id", "scope", "audience", "username")]
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:24]
+
+
+def token_request(auth, vals, form):
+    """POST to the token URL; returns the token response JSON."""
+    f = lambda s: fill(s, vals)
+    url = f(auth.get("token_url"))
+    if not url:
+        raise ValueError("OAuth 2.0: set the access token URL.")
+    form = dict(form)
+    headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+    cid, secret = f(auth.get("client_id")), f(auth.get("client_secret"))
+    if auth.get("client_auth") == "body":
+        form.update(client_id=cid, **({"client_secret": secret} if secret else {}))
+    elif cid:
+        headers["Authorization"] = "Basic " + base64.b64encode(("%s:%s" % (urllib.parse.quote(cid), urllib.parse.quote(secret))).encode()).decode()
+    if f(auth.get("scope")):
+        form.setdefault("scope", f(auth.get("scope")))
+    if f(auth.get("audience")):
+        form.setdefault("audience", f(auth.get("audience")))
+    r = urllib.request.Request(url, data=urllib.parse.urlencode(form).encode(), method="POST", headers=headers)
+    opener = urllib.request.build_opener(*([urllib.request.ProxyHandler({})] if is_local(url) else []))
+    try:
+        with opener.open(r, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        raise ValueError("The token server said %s: %s" % (e.code, e.read().decode("utf-8", "replace")[:300]))
+    except (urllib.error.URLError, OSError) as e:
+        raise ValueError("Couldn't reach the token server: %s" % getattr(e, "reason", e))
+    try:
+        j = json.loads(raw)
+    except ValueError:
+        j = dict(urllib.parse.parse_qsl(raw))
+    if not j.get("access_token"):
+        raise ValueError("The token server didn't return an access token: %s" % raw[:300])
+    return j
+
+
+def store_token(store, auth, vals, j):
+    tok = {"access_token": j["access_token"], "refresh_token": j.get("refresh_token", ""),
+           "expires_at": time.time() + float(j.get("expires_in") or 3600), "token_type": j.get("token_type", "Bearer"),
+           "scope": j.get("scope", ""), "got": time.time()}
+    with store.lock:
+        store.data["tokens"][_token_key(auth, vals)] = tok
+        store.save()
+    return tok
+
+
+def oauth_token(store, auth, vals, force=False):
+    """A valid access token for this OAuth 2.0 config: cached, refreshed, or fetched (client credentials /
+    password). The authorization-code grant needs the user to sign in first (NeedsToken)."""
+    key = _token_key(auth, vals)
+    tok = store.data["tokens"].get(key)
+    if tok and not force and tok.get("expires_at", 0) - 30 > time.time():
+        return tok["access_token"]
+    if tok and tok.get("refresh_token"):
+        try:
+            return store_token(store, auth, vals, token_request(auth, vals, {"grant_type": "refresh_token",
+                                                                             "refresh_token": tok["refresh_token"]}))["access_token"]
+        except ValueError:
+            pass
+    grant = auth.get("grant") or "client_credentials"
+    if grant == "client_credentials":
+        j = token_request(auth, vals, {"grant_type": "client_credentials"})
+    elif grant == "password":
+        j = token_request(auth, vals, {"grant_type": "password", "username": fill(auth.get("username"), vals),
+                                       "password": fill(auth.get("password"), vals)})
+    else:
+        raise NeedsToken("This request uses OAuth 2.0 sign-in. Press \"Get new token\" in its Auth tab and sign in first.")
+    return store_token(store, auth, vals, j)["access_token"]
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -201,15 +540,28 @@ def is_local(url):
     return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or host.endswith(".localhost") or net.is_local(host)
 
 
-def send(req, vals, timeout=30, follow=True, verify=True):
-    """Send one request. Never raises for HTTP errors: a 404 or 500 is a normal result."""
-    b = build(req, vals)
-    out = {"method": b["method"], "url": b["url"], "missing": b["missing"], "sent_headers": b["headers"]}
+def send(req, vals, timeout=30, follow=True, verify=True, auth=None, store=None, project=None, settings=None):
+    """Send one request. Never raises for HTTP errors: a 404 or 500 is a normal result.
+    settings (optional): timeout_ms, follow, verify, proxy, cert, key, cookies."""
+    s = dict(settings or {})
+    timeout = float(s.get("timeout_ms") or timeout * 1000) / 1000
+    follow = s.get("follow", follow) is not False
+    verify = s.get("verify", verify) is not False
+    out = {}
+    try:
+        b = build(req, vals, auth, store)
+    except NeedsToken as e:
+        return {"method": req.get("method"), "url": req.get("url"), "error": str(e), "needs_token": True, "missing": []}
+    except ValueError as e:
+        return {"method": req.get("method"), "url": req.get("url"), "error": str(e), "missing": []}
+    out.update(method=b["method"], url=b["url"], missing=b["missing"], sent_headers=b["headers"])
     if not b["url"] or not urllib.parse.urlsplit(b["url"]).hostname:
         out["error"] = "Enter a URL, e.g. http://localhost:3000/api/users"
         return out
     handlers = []
-    if is_local(b["url"]):
+    if s.get("proxy"):
+        handlers.append(urllib.request.ProxyHandler({"http": s["proxy"], "https": s["proxy"]}))
+    elif is_local(b["url"]):
         handlers.append(urllib.request.ProxyHandler({}))   # skip corporate proxies for local addresses
     if not follow:
         handlers.append(_NoRedirect())
@@ -217,7 +569,20 @@ def send(req, vals, timeout=30, follow=True, verify=True):
     if not verify:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+    if s.get("cert"):
+        try:
+            ctx.load_cert_chain(s["cert"], s.get("key") or None, s.get("passphrase") or None)
+        except (OSError, ssl.SSLError) as e:
+            out["error"] = "Couldn't load the client certificate: %s" % e
+            return out
     handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    jar = store.jar(project) if store is not None and s.get("cookies", True) is not False else None
+    if jar is not None:
+        handlers.append(urllib.request.HTTPCookieProcessor(jar))
+    if b["digest"]:
+        pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        pm.add_password(None, b["url"], b["digest"][0], b["digest"][1])
+        handlers.append(urllib.request.HTTPDigestAuthHandler(pm))
     opener = urllib.request.build_opener(*handlers)
     r = urllib.request.Request(b["url"], data=b["data"], method=b["method"])
     for k, v in b["headers"]:
@@ -234,9 +599,9 @@ def send(req, vals, timeout=30, follow=True, verify=True):
         if isinstance(reason, ConnectionRefusedError) or "refused" in msg.lower():
             msg = "Connection refused: nothing is listening at %s. Is the server running?" % urllib.parse.urlsplit(b["url"]).netloc
         elif "timed out" in msg.lower():
-            msg = "No answer within %d seconds." % timeout
+            msg = "No answer within %g seconds." % timeout
         elif "certificate" in msg.lower():
-            msg += " (turn off certificate checks for self-signed local servers)"
+            msg += " (turn off certificate checks in Settings for self-signed local servers)"
         out.update(error=msg, ms=int((time.time() - t0) * 1000))
         return out
     try:
@@ -245,15 +610,22 @@ def send(req, vals, timeout=30, follow=True, verify=True):
         raw = b""
         out["error"] = "The response was cut off: %s" % e
     ms = int((time.time() - t0) * 1000)
+    if jar is not None:
+        store.save_jar(project)
     truncated = len(raw) > MAX_BODY
     raw = raw[:MAX_BODY]
     hdrs = list(resp.headers.items()) if resp.headers else []
     ctype = next((v for k, v in hdrs if k.lower() == "content-type"), "")
     m = re.search(r"charset=([\w-]+)", ctype, re.I)
     binary = b"\0" in raw[:2048] or re.match(r"(image|audio|video|font)/|application/(octet-stream|pdf|zip)", ctype, re.I)
+    cookies = []
+    for k, v in hdrs:
+        if k.lower() == "set-cookie":
+            name, _, rest = v.partition("=")
+            cookies.append({"name": name.strip(), "value": rest.split(";", 1)[0], "raw": v})
     out.update(status=getattr(resp, "status", None) or resp.getcode(), reason=getattr(resp, "reason", "") or "",
                headers=hdrs, size=len(raw), ms=ms, final_url=resp.geturl() if hasattr(resp, "geturl") else b["url"],
-               content_type=ctype, truncated=truncated)
+               content_type=ctype, truncated=truncated, cookies=cookies)
     if binary:
         out["body_b64"] = base64.b64encode(raw[:2 * 1024 * 1024]).decode()
         out["body"] = ""
@@ -336,6 +708,13 @@ def run_checks(checks, res):
                 body = res.get("body") or ""
                 actual = (body[:80] + "…") if len(body) > 80 else body
                 ok = (want in body) if op != "not_contains" else (want not in body)
+            elif kind == "schema":
+                doc = res.get("json")
+                if doc is None:
+                    raise KeyError("not JSON")
+                problems = validate_schema(doc, c.get("schema") or {})
+                ok = not problems
+                actual = "matches" if ok else "; ".join(problems[:3]) + (" (+%d more)" % (len(problems) - 3) if len(problems) > 3 else "")
             elif kind == "json":
                 doc = res.get("json")
                 if doc is None:
@@ -402,6 +781,8 @@ def describe(c):
         return "Header %s %s" % (path, "exists" if op == "exists" else "%s %s" % (OP_WORDS.get(op, op), want))
     if kind == "body":
         return "Body %s %r" % (OP_WORDS.get(op, op), want)
+    if kind == "schema":
+        return "Body matches the response schema"
     w = "" if op in ("exists", "missing") else " " + str(want)
     return "JSON %s %s%s" % (path or "$", OP_WORDS.get(op, op), w)
 
@@ -495,90 +876,261 @@ def to_curl(req, vals=None, secrets=()):
     return mask(" ".join(parts), secrets)
 
 
+PM_AUTH_IN = {"noauth": "none", "bearer": "bearer", "basic": "basic", "apikey": "apikey", "digest": "digest",
+              "oauth2": "oauth2", "awsv4": "awsv4"}
+PM_GRANT = {"client_credentials": "client_credentials", "password_credentials": "password",
+            "authorization_code": "authorization_code", "authorization_code_with_pkce": "authorization_code"}
+
+
+def _pm_auth_in(a):
+    if not isinstance(a, dict) or not a.get("type"):
+        return {"type": "inherit"}
+    t = a["type"]
+    vals = {x.get("key"): x.get("value") for x in a.get(t, []) or [] if isinstance(x, dict)} if isinstance(a.get(t), list) \
+        else dict(a.get(t) or {}) if isinstance(a.get(t), dict) else {}
+    s = lambda k, d="": "" if vals.get(k) is None else str(vals.get(k, d))
+    if t == "bearer":
+        return {"type": "bearer", "token": s("token")}
+    if t == "basic" or t == "digest":
+        return {"type": t, "username": s("username"), "password": s("password")}
+    if t == "apikey":
+        return {"type": "apikey", "key": s("key"), "value": s("value"), "in": "query" if vals.get("in") == "query" else "header"}
+    if t == "awsv4":
+        return {"type": "awsv4", "access_key": s("accessKey"), "secret_key": s("secretKey"), "session_token": s("sessionToken"),
+                "region": s("region"), "service": s("service")}
+    if t == "oauth2":
+        return {"type": "oauth2", "grant": PM_GRANT.get(s("grant_type"), "authorization_code"), "token_url": s("accessTokenUrl"),
+                "auth_url": s("authUrl"), "client_id": s("clientId"), "client_secret": s("clientSecret"), "scope": s("scope"),
+                "username": s("username"), "password": s("password"), "pkce": s("grant_type") == "authorization_code_with_pkce",
+                "add_to": "query" if vals.get("addTokenTo") == "queryParams" else "header", "prefix": s("headerPrefix") or "Bearer",
+                "client_auth": "body" if vals.get("client_authentication") == "body" else "header", "audience": s("audience")}
+    return {"type": PM_AUTH_IN.get(t, "none")}
+
+
+def _pm_auth_out(a):
+    t = (a or {}).get("type", "inherit")
+    kv = lambda d: [{"key": k, "value": v, "type": "string"} for k, v in d.items()]
+    if t == "inherit":
+        return None
+    if t == "none":
+        return {"type": "noauth"}
+    if t == "bearer":
+        return {"type": "bearer", "bearer": kv({"token": a.get("token", "")})}
+    if t in ("basic", "digest"):
+        return {"type": t, t: kv({"username": a.get("username", ""), "password": a.get("password", "")})}
+    if t == "apikey":
+        return {"type": "apikey", "apikey": kv({"key": a.get("key", ""), "value": a.get("value", ""), "in": a.get("in", "header")})}
+    if t == "awsv4":
+        return {"type": "awsv4", "awsv4": kv({"accessKey": a.get("access_key", ""), "secretKey": a.get("secret_key", ""),
+                                               "sessionToken": a.get("session_token", ""), "region": a.get("region", ""),
+                                               "service": a.get("service", "")})}
+    if t == "oauth2":
+        g = a.get("grant", "client_credentials")
+        grant = {"client_credentials": "client_credentials", "password": "password_credentials"}.get(
+            g, "authorization_code_with_pkce" if a.get("pkce") else "authorization_code")
+        return {"type": "oauth2", "oauth2": kv({"grant_type": grant, "accessTokenUrl": a.get("token_url", ""), "authUrl": a.get("auth_url", ""),
+                                                 "clientId": a.get("client_id", ""), "clientSecret": a.get("client_secret", ""),
+                                                 "scope": a.get("scope", ""), "username": a.get("username", ""), "password": a.get("password", ""),
+                                                 "addTokenTo": "queryParams" if a.get("add_to") == "query" else "header",
+                                                 "headerPrefix": a.get("prefix", "Bearer"),
+                                                 "client_authentication": "body" if a.get("client_auth") == "body" else "header"})}
+    return None
+
+
+def _pm_events_in(events):
+    pre, test = [], []
+    for ev in events or []:
+        src = (ev.get("script") or {}).get("exec") or []
+        code = "\n".join(src) if isinstance(src, list) else str(src)
+        (pre if ev.get("listen") == "prerequest" else test if ev.get("listen") == "test" else []).append(code)
+    return "\n".join(x for x in pre if x.strip()), "\n".join(x for x in test if x.strip())
+
+
+def _pm_events_out(node):
+    ev = []
+    for listen, k in (("prerequest", "pre_script"), ("test", "test_script")):
+        if (node.get(k) or "").strip():
+            ev.append({"listen": listen, "script": {"type": "text/javascript", "exec": node[k].split("\n")}})
+    return ev
+
+
 def from_postman(doc):
-    """(collection, environment-or-None) from a Postman v2.0/2.1 collection export."""
+    """(collection, environment-or-None) from a Postman v2.0/2.1 collection export, keeping folders,
+    scripts, auth, variables, bodies (incl. form-data, files, GraphQL), path variables and examples."""
     if not isinstance(doc, dict) or "item" not in doc:
         raise ValueError("That isn't a Postman collection (it has no 'item' list).")
     info = doc.get("info") or {}
-    col = {"id": new_id(), "name": info.get("name") or "Imported collection", "requests": []}
+    col = blank_collection(info.get("name") or "Imported collection")
+    col["description"] = info.get("description") if isinstance(info.get("description"), str) else ""
+    col["auth"] = _pm_auth_in(doc.get("auth"))
+    if col["auth"]["type"] == "inherit":
+        col["auth"] = {"type": "none"}
+    col["pre_script"], col["test_script"] = _pm_events_in(doc.get("event"))
+    col["variables"] = [{"key": v.get("key", ""), "value": "" if v.get("value") is None else str(v.get("value")),
+                         "enabled": not v.get("disabled")} for v in doc.get("variable") or [] if isinstance(v, dict) and v.get("key")]
 
     def kv(lst):
-        return [{"key": x.get("key", ""), "value": str(x.get("value", "")), "enabled": not x.get("disabled")}
+        return [{"key": x.get("key", ""), "value": "" if x.get("value") is None else str(x.get("value")), "enabled": not x.get("disabled")}
                 for x in lst or [] if isinstance(x, dict)]
 
-    def walk(items, prefix):
-        for it in items or []:
-            if "item" in it:
-                walk(it["item"], prefix + (it.get("name") or "") + " / ")
-                continue
-            rq = it.get("request") or {}
-            if isinstance(rq, str):
-                rq = {"url": rq, "method": "GET"}
-            url = rq.get("url") or ""
-            params = []
-            if isinstance(url, dict):
-                params = kv(url.get("query"))
-                url = url.get("raw") or ""
-                url = url.split("?", 1)[0] if params else url
-            r = blank_request(prefix + (it.get("name") or "Request"), (rq.get("method") or "GET").upper(), url)
-            r["params"] = params
-            r["headers"] = kv(rq.get("header") if isinstance(rq.get("header"), list) else [])
-            body = rq.get("body") or {}
-            mode = body.get("mode")
-            if mode == "raw":
-                lang = ((body.get("options") or {}).get("raw") or {}).get("language", "")
-                raw = body.get("raw") or ""
-                r["body"] = {"mode": "json" if lang == "json" or raw.strip()[:1] in ("{", "[") else "text", "text": raw, "form": []}
-            elif mode in ("urlencoded", "formdata"):
-                r["body"] = {"mode": "form", "text": "", "form": [f for f in kv(body.get(mode)) if f["key"]]}
-            auth = rq.get("auth") or {}
-            vals = {x.get("key"): x.get("value") for x in auth.get(auth.get("type", ""), []) or [] if isinstance(x, dict)}
-            if auth.get("type") == "bearer":
-                r["auth"] = {"type": "bearer", "token": str(vals.get("token", ""))}
-            elif auth.get("type") == "basic":
-                r["auth"] = {"type": "basic", "username": str(vals.get("username", "")), "password": str(vals.get("password", ""))}
-            elif auth.get("type") == "apikey":
-                r["auth"] = {"type": "apikey", "key": str(vals.get("key", "")), "value": str(vals.get("value", "")),
-                             "in": "query" if vals.get("in") == "query" else "header"}
-            # pm.response.to.have.status(200) in a test script → a status check
-            checks = []
-            for ev in it.get("event") or []:
-                src = "\n".join((ev.get("script") or {}).get("exec") or [])
-                for code in re.findall(r"to\.have\.status\((\d{3})\)", src):
-                    checks.append({"kind": "status", "op": "eq", "value": code, "enabled": True})
-            r["checks"] = checks or default_checks()
-            col["requests"].append(r)
-    walk(doc["item"], "")
+    def item(it):
+        ext = it.get("_vscode_assistant") or {}
+        if "item" in it:
+            f = {"id": ext.get("id") or new_id(), "name": it.get("name") or "Folder", "folder": True, "items": [],
+                 "auth": _pm_auth_in(it.get("auth")), "description": it.get("description") if isinstance(it.get("description"), str) else ""}
+            f["pre_script"], f["test_script"] = _pm_events_in(it.get("event"))
+            f["items"] = [item(x) for x in it["item"] or []]
+            return f
+        rq = it.get("request") or {}
+        if isinstance(rq, str):
+            rq = {"url": rq, "method": "GET"}
+        url = rq.get("url") or ""
+        params, path_vars = [], []
+        if isinstance(url, dict):
+            params, path_vars = kv(url.get("query")), kv(url.get("variable"))
+            raw = url.get("raw") or ""
+            url = raw.split("?", 1)[0] if url.get("query") is not None else raw
+        r = blank_request(it.get("name") or "Request", (rq.get("method") or "GET").upper(), url)
+        r["id"] = ext.get("id") or r["id"]
+        r["params"], r["path_vars"] = params, path_vars
+        r["headers"] = kv(rq.get("header") if isinstance(rq.get("header"), list) else [])
+        r["auth"] = _pm_auth_in(rq.get("auth"))
+        r["description"] = rq.get("description") if isinstance(rq.get("description"), str) else ""
+        body = rq.get("body") or {}
+        mode = body.get("mode")
+        if mode == "raw":
+            lang = ((body.get("options") or {}).get("raw") or {}).get("language", "")
+            raw = body.get("raw") or ""
+            m = "json" if lang == "json" or (not lang and raw.strip()[:1] in ("{", "[")) else "xml" if lang == "xml" else "text"
+            r["body"] = {"mode": m, "text": raw, "form": []}
+        elif mode == "urlencoded":
+            r["body"] = {"mode": "form", "text": "", "form": [f for f in kv(body.get("urlencoded")) if f["key"]]}
+        elif mode == "formdata":
+            rows = []
+            for x in body.get("formdata") or []:
+                row = {"key": x.get("key", ""), "value": "" if x.get("value") is None else str(x.get("value")), "enabled": not x.get("disabled"),
+                       "type": "file" if x.get("type") == "file" else "text"}
+                if row["type"] == "file":
+                    src = x.get("src") if isinstance(x.get("src"), str) else ""
+                    row["file"] = (x.get("_vscode_assistant") or {}).get("file") or {"name": os.path.basename(src) if src else "", "id": ""}
+                rows.append(row)
+            r["body"] = {"mode": "multipart", "text": "", "form": rows}
+        elif mode == "file":
+            r["body"] = {"mode": "binary", "text": "", "form": [], "file": ext.get("file") or {"id": "", "name": os.path.basename((body.get("file") or {}).get("src") or "")}}
+        elif mode == "graphql":
+            g = body.get("graphql") or {}
+            r["body"] = {"mode": "graphql", "text": "", "form": [], "query": g.get("query", ""), "variables": g.get("variables", "") or ""}
+        r["pre_script"], r["test_script"] = _pm_events_in(it.get("event"))
+        pb = it.get("protocolProfileBehavior") or {}
+        r["settings"] = dict(ext.get("settings") or {})
+        if pb.get("followRedirects") is False:
+            r["settings"]["follow"] = False
+        if pb.get("strictSSL") is False:
+            r["settings"]["verify"] = False
+        r["checks"] = ext.get("checks") if isinstance(ext.get("checks"), list) else []
+        r["examples"] = []
+        for ex in it.get("response") or []:
+            if isinstance(ex, dict):
+                r["examples"].append({"name": ex.get("name") or "Example", "status": ex.get("code"), "reason": ex.get("status", ""),
+                                      "headers": [[h.get("key"), h.get("value")] for h in ex.get("header") or [] if isinstance(h, dict)],
+                                      "body": ex.get("body") or ""})
+        return r
+    col["items"] = [item(x) for x in doc["item"]]
     env = None
-    if doc.get("variable"):
-        env = {"id": new_id(), "name": col["name"] + " variables",
-               "vars": [{"key": v.get("key", ""), "value": str(v.get("value", "")), "secret": False, "enabled": True}
-                        for v in doc["variable"] if isinstance(v, dict) and v.get("key")]}
     return col, env
 
 
 def to_postman(col):
-    items = []
-    for r in col["requests"]:
-        rq = {"method": r["method"], "header": [{"key": h["key"], "value": h["value"], "disabled": not h.get("enabled", True)}
-                                               for h in r.get("headers") or []],
-              "url": {"raw": r["url"] + (("?" + "&".join("%s=%s" % (p["key"], p["value"]) for p in r["params"] if p.get("enabled", True)))
-                                         if r.get("params") else ""),
-                      "query": [{"key": p["key"], "value": p["value"], "disabled": not p.get("enabled", True)} for p in r.get("params") or []]}}
-        b = r.get("body") or {}
-        if b.get("mode") in ("json", "text"):
-            rq["body"] = {"mode": "raw", "raw": b.get("text", ""), "options": {"raw": {"language": "json" if b["mode"] == "json" else "text"}}}
-        elif b.get("mode") == "form":
+    """A Postman v2.1 collection: Postman (and Newman) can open it; checks are kept in an extension field."""
+    def url_obj(r):
+        q = [{"key": p["key"], "value": p["value"], **({"disabled": True} if p.get("enabled") is False else {})} for p in r.get("params") or []]
+        raw = r.get("url", "") + (("?" + "&".join("%s=%s" % (p["key"], p["value"]) for p in r.get("params") or [] if p.get("enabled", True))) if q else "")
+        u = {"raw": raw}
+        if q:
+            u["query"] = q
+        if r.get("path_vars"):
+            u["variable"] = [{"key": p["key"], "value": p["value"]} for p in r["path_vars"]]
+        return u
+
+    def item(n):
+        if n.get("folder"):
+            out = {"name": n["name"], "item": [item(x) for x in n.get("items") or []], "_vscode_assistant": {"id": n["id"]}}
+            a = _pm_auth_out(n.get("auth"))
+            if a:
+                out["auth"] = a
+            if _pm_events_out(n):
+                out["event"] = _pm_events_out(n)
+            if n.get("description"):
+                out["description"] = n["description"]
+            return out
+        rq = {"method": n["method"], "header": [{"key": h["key"], "value": h["value"], **({"disabled": True} if h.get("enabled") is False else {})}
+                                                for h in n.get("headers") or []], "url": url_obj(n)}
+        b = n.get("body") or {}
+        m = b.get("mode")
+        if m in ("json", "text", "xml"):
+            rq["body"] = {"mode": "raw", "raw": b.get("text", ""), "options": {"raw": {"language": m}}}
+        elif m == "form":
             rq["body"] = {"mode": "urlencoded", "urlencoded": [{"key": f["key"], "value": f["value"]} for f in b.get("form") or []]}
-        a = r.get("auth") or {}
-        if a.get("type") == "bearer":
-            rq["auth"] = {"type": "bearer", "bearer": [{"key": "token", "value": a.get("token", ""), "type": "string"}]}
-        elif a.get("type") == "basic":
-            rq["auth"] = {"type": "basic", "basic": [{"key": "username", "value": a.get("username", "")},
-                                                     {"key": "password", "value": a.get("password", "")}]}
-        items.append({"name": r["name"], "request": rq})
-    return {"info": {"name": col["name"], "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
-            "item": items}
+        elif m == "multipart":
+            rq["body"] = {"mode": "formdata", "formdata": [
+                {"key": f["key"], "type": "file", "src": (f.get("file") or {}).get("name", ""), "_vscode_assistant": {"file": f.get("file")}}
+                if f.get("type") == "file" else {"key": f["key"], "value": f.get("value", ""), "type": "text"} for f in b.get("form") or []]}
+        elif m == "binary":
+            rq["body"] = {"mode": "file", "file": {"src": (b.get("file") or {}).get("name", "")}}
+        elif m == "graphql":
+            rq["body"] = {"mode": "graphql", "graphql": {"query": b.get("query", ""), "variables": b.get("variables", "")}}
+        a = _pm_auth_out(n.get("auth"))
+        if a:
+            rq["auth"] = a
+        if n.get("description"):
+            rq["description"] = n["description"]
+        out = {"name": n["name"], "request": rq,
+               "_vscode_assistant": {"id": n["id"], "checks": n.get("checks") or [], "settings": n.get("settings") or {},
+                                     **({"file": b.get("file")} if m == "binary" else {})}}
+        if _pm_events_out(n):
+            out["event"] = _pm_events_out(n)
+        s = n.get("settings") or {}
+        pb = {}
+        if s.get("follow") is False:
+            pb["followRedirects"] = False
+        if s.get("verify") is False:
+            pb["strictSSL"] = False
+        if pb:
+            out["protocolProfileBehavior"] = pb
+        if n.get("examples"):
+            out["response"] = [{"name": e.get("name", "Example"), "code": e.get("status"), "status": e.get("reason", ""),
+                                "header": [{"key": k, "value": v} for k, v in e.get("headers") or []], "body": e.get("body", ""),
+                                "originalRequest": rq} for e in n["examples"]]
+        return out
+    out = {"info": {"name": col["name"], "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+                    **({"description": col["description"]} if col.get("description") else {})},
+           "item": [item(x) for x in col.get("items") or []]}
+    a = _pm_auth_out(col.get("auth"))
+    if a and a.get("type") != "noauth":
+        out["auth"] = a
+    if _pm_events_out(col):
+        out["event"] = _pm_events_out(col)
+    if col.get("variables"):
+        out["variable"] = [{"key": v["key"], "value": v.get("value", ""), **({"disabled": True} if v.get("enabled") is False else {})}
+                           for v in col["variables"]]
+    return out
+
+
+def env_from_postman(doc):
+    """An environment from a Postman environment export."""
+    vals = doc.get("values") if isinstance(doc, dict) else None
+    if not isinstance(vals, list):
+        raise ValueError("That isn't a Postman environment.")
+    return {"id": new_id(), "name": doc.get("name") or "Imported environment",
+            "vars": [{"key": v.get("key", ""), "value": "" if v.get("value") is None else str(v.get("value")),
+                      "secret": v.get("type") == "secret", "enabled": v.get("enabled", True) is not False}
+                     for v in vals if isinstance(v, dict) and v.get("key")]}
+
+
+def env_to_postman(env, include_secrets=False):
+    return {"name": env["name"], "_postman_variable_scope": "environment",
+            "values": [{"key": v["key"], "value": "" if v.get("secret") and not include_secrets else v.get("value", ""),
+                        "type": "secret" if v.get("secret") else "default", "enabled": v.get("enabled", True)} for v in env.get("vars") or []]}
 
 
 # ── endpoints in the code, and in the docs ───────────────────────────────
@@ -892,28 +1444,6 @@ def is_safe(req, vals=None):
     return b["method"] in SAFE_METHODS and is_local(b["url"])
 
 
-def run_collection(col, vals, secrets=(), timeout=30, on_result=None):
-    """Send every request in order and run its checks. Returns (results, text summary for the Tests list)."""
-    results, lines = [], []
-    for r in col.get("requests") or []:
-        res = send(r, vals, timeout=timeout)
-        checks = run_checks(r.get("checks") or default_checks(), res)
-        ok = not res.get("error") and all(c["pass"] for c in checks)
-        item = {"id": r["id"], "name": r["name"], "method": res.get("method"), "url": mask(res.get("url", ""), secrets),
-                "status": res.get("status"), "ms": res.get("ms"), "error": res.get("error", ""), "checks": checks, "pass": ok}
-        results.append(item)
-        what = "%s %s" % (r["name"], "(%s, %s ms)" % (res.get("status"), res.get("ms")) if not res.get("error") else "(%s)" % res["error"])
-        lines.append(("PASS " if ok else "FAIL ") + what)
-        for c in checks:
-            if not c["pass"]:
-                lines.append("    %s: got %s" % (c["label"], c["actual"]))
-        if on_result:
-            on_result(item)
-    passed = sum(1 for x in results if x["pass"])
-    lines.append("%d passed, %d failed" % (passed, len(results) - passed) if results else "No requests in this collection.")
-    return results, mask("\n".join(lines), secrets)
-
-
 def pretty_body(res, limit=6000):
     if res.get("json") is not None:
         text = json.dumps(res["json"], indent=2, ensure_ascii=False)
@@ -922,3 +1452,461 @@ def pretty_body(res, limit=6000):
     else:
         text = res.get("body") or ""
     return text if len(text) <= limit else text[:limit] + "\n…[%d more characters]" % (len(text) - limit)
+
+
+# ── code snippets ────────────────────────────────────────────────────────
+def codegen(lang, req, vals, auth=None, store=None):
+    """The request as code: curl, python, javascript, java, csharp, go, powershell."""
+    try:
+        b = build(req, vals, auth, store)
+    except NeedsToken:
+        b = build(dict(req, auth={"type": "none"}), vals, {"type": "none"}, store)
+    hdrs = [(k, v) for k, v in b["headers"] if not (k == "User-Agent" and v.startswith("VSCodeAssistant")) and not (k == "Accept" and v == "*/*")]
+    body = b["data"].decode("utf-8", "replace") if b["data"] is not None else None
+    binary = (req.get("body") or {}).get("mode") in ("multipart", "binary")
+    m, url = b["method"], b["url"]
+    js = lambda s: json.dumps(s, ensure_ascii=False)
+    if lang == "curl":
+        return to_curl(req, vals) if not auth else " ".join(["curl"] + (["-X", m] if m != "GET" else []) + [shlex.quote(url)] +
+                                                        sum([["-H", shlex.quote("%s: %s" % kv)] for kv in hdrs], []) +
+                                                        (["--data-raw", shlex.quote(body)] if body is not None and not binary else []))
+    if lang == "python":
+        lines = ["import requests", "", "url = %s" % js(url), "headers = {%s}" % ", ".join("%s: %s" % (js(k), js(v)) for k, v in hdrs)]
+        if body is not None and not binary:
+            lines.append("payload = %s" % js(body))
+        lines += ["", "response = requests.request(%s, url, headers=headers%s)" % (js(m), ", data=payload" if body is not None and not binary else ""),
+                  "print(response.status_code)", "print(response.text)"]
+        return "\n".join(lines)
+    if lang == "javascript":
+        opts = ["  method: %s," % js(m), "  headers: {%s}," % ", ".join("%s: %s" % (js(k), js(v)) for k, v in hdrs)]
+        if body is not None and not binary:
+            opts.append("  body: %s," % js(body))
+        return "const response = await fetch(%s, {\n%s\n});\nconsole.log(response.status, await response.text());" % (js(url), "\n".join(opts))
+    if lang == "java":
+        pub = "HttpRequest.BodyPublishers.ofString(%s)" % js(body) if body is not None and not binary else "HttpRequest.BodyPublishers.noBody()"
+        hl = "".join('\n        .header(%s, %s)' % (js(k), js(v)) for k, v in hdrs if k.lower() not in ("host", "content-length", "connection"))
+        return ("import java.net.URI;\nimport java.net.http.HttpClient;\nimport java.net.http.HttpRequest;\nimport java.net.http.HttpResponse;\n\n"
+                "HttpClient client = HttpClient.newHttpClient();\nHttpRequest request = HttpRequest.newBuilder()\n"
+                "        .uri(URI.create(%s))%s\n        .method(%s, %s)\n        .build();\n"
+                "HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());\n"
+                "System.out.println(response.statusCode());\nSystem.out.println(response.body());") % (js(url), hl, js(m), pub)
+    if lang == "csharp":
+        ct = next((v for k, v in hdrs if k.lower() == "content-type"), "text/plain")
+        hl = "".join('\nrequest.Headers.TryAddWithoutValidation(%s, %s);' % (js(k), js(v)) for k, v in hdrs if k.lower() != "content-type")
+        content = ('\nrequest.Content = new StringContent(%s, System.Text.Encoding.UTF8, %s);' % (js(body), js(ct.split(";")[0]))) if body is not None and not binary else ""
+        return ("using var client = new HttpClient();\nvar request = new HttpRequestMessage(new HttpMethod(%s), %s);%s%s\n"
+                "var response = await client.SendAsync(request);\nConsole.WriteLine((int)response.StatusCode);\n"
+                "Console.WriteLine(await response.Content.ReadAsStringAsync());") % (js(m), js(url), hl, content)
+    if lang == "go":
+        bodyexpr = "strings.NewReader(%s)" % js(body) if body is not None and not binary else "nil"
+        hl = "".join("\n\treq.Header.Set(%s, %s)" % (js(k), js(v)) for k, v in hdrs)
+        return ('package main\n\nimport (\n\t"fmt"\n\t"io"\n\t"net/http"\n\t"strings"\n)\n\nfunc main() {\n'
+                '\treq, _ := http.NewRequest(%s, %s, %s)%s\n\tres, err := http.DefaultClient.Do(req)\n'
+                '\tif err != nil {\n\t\tpanic(err)\n\t}\n\tdefer res.Body.Close()\n\tbody, _ := io.ReadAll(res.Body)\n'
+                '\tfmt.Println(res.StatusCode, string(body))\n}') % (js(m), js(url), bodyexpr, hl)
+    if lang == "powershell":
+        hl = "; ".join("'%s' = '%s'" % (k.replace("'", "''"), v.replace("'", "''")) for k, v in hdrs)
+        return ("$headers = @{ %s }\n$response = Invoke-WebRequest -Uri '%s' -Method %s -Headers $headers%s\n$response.StatusCode\n$response.Content"
+                % (hl, url.replace("'", "''"), m, (" -Body '%s'" % body.replace("'", "''")) if body is not None and not binary else ""))
+    raise ValueError("Unknown language %r." % lang)
+
+
+# ── YAML (enough for OpenAPI files) ──────────────────────────────────────
+def load_yaml(text):
+    """A small YAML reader for block-style documents such as OpenAPI specs: mappings, lists, scalars,
+    quoted strings, | and > blocks, and simple [a, b] / {a: b} flow values. Anchors and tags aren't supported."""
+    lines = []
+    for raw in (text or "").replace("\t", "  ").splitlines():
+        s = raw.rstrip()
+        if not s.strip() or s.strip().startswith("#") or s.strip() in ("---", "..."):
+            lines.append(None if not s.strip().startswith(("|", ">")) else s)
+            continue
+        lines.append(s)
+
+    def strip_comment(v):
+        out, q = [], None
+        for i, ch in enumerate(v):
+            if q:
+                if ch == q:
+                    q = None
+            elif ch in "'\"":
+                q = ch
+            elif ch == "#" and (i == 0 or v[i - 1] == " "):
+                break
+            out.append(ch)
+        return "".join(out).strip()
+
+    def scalar(v):
+        v = strip_comment(v)
+        if v == "":
+            return None
+        if v[0] in "'\"" and v[-1] == v[0]:
+            return v[1:-1].replace("''", "'") if v[0] == "'" else json.loads(v) if "\\" in v else v[1:-1]
+        if v[0] in "[{":
+            return flow(v)
+        low = v.lower()
+        if low in ("true", "yes", "on"):
+            return True
+        if low in ("false", "no", "off"):
+            return False
+        if low in ("null", "~"):
+            return None
+        if re.fullmatch(r"-?\d+", v):
+            return int(v)
+        if re.fullmatch(r"-?\d+\.\d*(e[-+]?\d+)?", low):
+            return float(v)
+        return v
+
+    def flow(v):
+        try:
+            return json.loads(v)
+        except ValueError:
+            pass
+        inner = v[1:-1].strip()
+        parts, depth, cur, q = [], 0, "", None
+        for ch in inner:
+            if q:
+                q = None if ch == q else q
+            elif ch in "'\"":
+                q = ch
+            elif ch in "[{":
+                depth += 1
+            elif ch in "]}":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                parts.append(cur.strip())
+                cur = ""
+                continue
+            cur += ch
+        if cur.strip():
+            parts.append(cur.strip())
+        if v[0] == "[":
+            return [scalar(p) for p in parts]
+        out = {}
+        for p in parts:
+            k, _, val = p.partition(":")
+            out[str(scalar(k))] = scalar(val)
+        return out
+
+    pos = [0]
+    n = len(lines)
+
+    def indent(i):
+        return len(lines[i]) - len(lines[i].lstrip())
+
+    def skip():
+        while pos[0] < n and lines[pos[0]] is None:
+            pos[0] += 1
+
+    def block_scalar(style, ind):
+        out = []
+        while pos[0] < n:
+            ln = lines[pos[0]]
+            if ln is not None and indent(pos[0]) <= ind:
+                break
+            out.append("" if ln is None else ln)
+            pos[0] += 1
+        base = min((len(x) - len(x.lstrip()) for x in out if x.strip()), default=0)
+        body = [x[base:] for x in out]
+        while body and not body[-1].strip():
+            body.pop()
+        return "\n".join(body) + "\n" if style.startswith("|") else " ".join(x.strip() for x in body) + "\n"
+
+    def parse(ind):
+        skip()
+        if pos[0] >= n:
+            return None
+        if lines[pos[0]].lstrip().startswith("- ") or lines[pos[0]].strip() == "-":
+            return parse_list(indent(pos[0]))
+        return parse_map(indent(pos[0]))
+
+    def value_after(rest, ind):
+        rest = rest.strip()
+        if rest.startswith(("|", ">")):
+            pos[0] += 1
+            return block_scalar(rest, ind)
+        pos[0] += 1
+        if strip_comment(rest) == "":
+            skip()
+            if pos[0] < n and (indent(pos[0]) > ind or (indent(pos[0]) == ind and lines[pos[0]].lstrip().startswith("- "))):
+                return parse(indent(pos[0]))
+            return None
+        return scalar(rest)
+
+    def parse_map(ind):
+        out = {}
+        while True:
+            skip()
+            if pos[0] >= n or indent(pos[0]) != ind or lines[pos[0]].lstrip().startswith("- "):
+                return out
+            s = lines[pos[0]].strip()
+            m = re.match(r"""^("(?:[^"\\]|\\.)*"|'[^']*'|[^:#][^:]*?)\s*:(\s+|$)(.*)$""", s)
+            if not m:
+                raise ValueError("Couldn't read YAML line %d: %s" % (pos[0] + 1, s))
+            key = scalar(m.group(1))
+            out[str(key)] = value_after(m.group(3), ind)
+
+    def parse_list(ind):
+        out = []
+        while True:
+            skip()
+            if pos[0] >= n or indent(pos[0]) != ind or not (lines[pos[0]].lstrip().startswith("- ") or lines[pos[0]].strip() == "-"):
+                return out
+            s = lines[pos[0]].strip()[1:].strip()
+            if not s:
+                pos[0] += 1
+                skip()
+                out.append(parse(indent(pos[0])) if pos[0] < n and indent(pos[0]) > ind else None)
+            elif re.match(r"""^("(?:[^"\\]|\\.)*"|'[^']*'|[^:#\[{][^:]*?)\s*:(\s+|$)""", s):
+                # "- key: value" starts a mapping indented past the dash
+                lines[pos[0]] = " " * (ind + 2) + s
+                out.append(parse_map(ind + 2))
+            else:
+                out.append(value_after(s, ind) if s.startswith(("|", ">")) else scalar(s))
+                if not s.startswith(("|", ">")):
+                    pos[0] += 1
+        return out
+
+    try:
+        result = parse(0)
+    except (IndexError, ValueError) as e:
+        raise ValueError(str(e))
+    if not isinstance(result, (dict, list)):
+        raise ValueError("That isn't YAML.")
+    return result
+
+
+# ── OpenAPI ──────────────────────────────────────────────────────────────
+def _ref(spec, node, depth=0):
+    while isinstance(node, dict) and "$ref" in node and depth < 20:
+        path = node["$ref"].lstrip("#/").split("/")
+        cur = spec
+        for p in path:
+            cur = (cur or {}).get(p.replace("~1", "/").replace("~0", "~")) if isinstance(cur, dict) else None
+        node, depth = cur or {}, depth + 1
+    return node
+
+
+def example_of(spec, schema, depth=0):
+    """An example value for a JSON schema (uses example/default/enum, else a typed placeholder)."""
+    schema = _ref(spec, schema or {})
+    if depth > 6 or not isinstance(schema, dict):
+        return None
+    for k in ("example", "default"):
+        if k in schema:
+            return schema[k]
+    if schema.get("examples") and isinstance(schema["examples"], list):
+        return schema["examples"][0]
+    if schema.get("enum"):
+        return schema["enum"][0]
+    for k in ("allOf",):
+        if schema.get(k):
+            out = {}
+            for s in schema[k]:
+                v = example_of(spec, s, depth + 1)
+                if isinstance(v, dict):
+                    out.update(v)
+            return out
+    for k in ("oneOf", "anyOf"):
+        if schema.get(k):
+            return example_of(spec, schema[k][0], depth + 1)
+    t = schema.get("type")
+    if isinstance(t, list):
+        t = next((x for x in t if x != "null"), "string")
+    if t == "object" or "properties" in schema:
+        return {k: example_of(spec, v, depth + 1) for k, v in (schema.get("properties") or {}).items()}
+    if t == "array":
+        return [example_of(spec, schema.get("items") or {}, depth + 1)]
+    if t == "integer":
+        return 0
+    if t == "number":
+        return 0.0
+    if t == "boolean":
+        return True
+    fmt = schema.get("format", "")
+    return {"date-time": "2024-01-01T00:00:00Z", "date": "2024-01-01", "email": "user@example.com", "uuid": str(uuid.UUID(int=0)),
+            "uri": "https://example.com"}.get(fmt, "string")
+
+
+def inline_schema(spec, schema, depth=0):
+    """A schema with its $refs replaced by what they point to (so a check can carry it)."""
+    schema = _ref(spec, schema)
+    if depth > 12 or not isinstance(schema, (dict, list)):
+        return schema
+    if isinstance(schema, list):
+        return [inline_schema(spec, s, depth + 1) for s in schema]
+    return {k: inline_schema(spec, v, depth + 1) if isinstance(v, (dict, list)) else v for k, v in schema.items()}
+
+
+def from_openapi(spec):
+    """A collection (folders by tag) and an environment with baseUrl, from an OpenAPI 3.x or Swagger 2 spec.
+    Each request gets an example body, its parameters, and checks for the documented status and response schema."""
+    if not isinstance(spec, dict):
+        raise ValueError("That isn't an OpenAPI document.")
+    info = spec.get("info") or {}
+    col = blank_collection(info.get("title") or "API")
+    col["description"] = info.get("description") or ""
+    if "openapi" in spec:
+        servers = spec.get("servers") or [{}]
+        base = (servers[0] or {}).get("url") or "http://localhost:3000"
+        for name, var in ((servers[0] or {}).get("variables") or {}).items():
+            base = base.replace("{%s}" % name, str((var or {}).get("default", "")))
+    else:
+        scheme = (spec.get("schemes") or ["https"])[0]
+        base = "%s://%s%s" % (scheme, spec.get("host") or "localhost", spec.get("basePath") or "")
+    base = base.rstrip("/")
+    env = {"id": new_id(), "name": (info.get("title") or "API") + " (from spec)", "vars": [{"key": "baseUrl", "value": base, "secret": False, "enabled": True}]}
+    col["variables"] = [{"key": "baseUrl", "value": base, "enabled": True}]     # like Postman: works before an environment is picked
+    schemes = (spec.get("components") or {}).get("securitySchemes") or spec.get("securityDefinitions") or {}
+    sec = spec.get("security") or []
+    if sec and isinstance(sec[0], dict) and sec[0]:
+        sch = _ref(spec, schemes.get(next(iter(sec[0])), {}))
+        t, s = sch.get("type"), (sch.get("scheme") or "").lower()
+        if t == "http" and s == "bearer":
+            col["auth"] = {"type": "bearer", "token": "{{token}}"}
+            env["vars"].append({"key": "token", "value": "", "secret": True, "enabled": True})
+        elif t == "http" and s == "basic" or t == "basic":
+            col["auth"] = {"type": "basic", "username": "{{username}}", "password": "{{password}}"}
+        elif t == "apiKey":
+            col["auth"] = {"type": "apikey", "key": sch.get("name", "X-API-Key"), "value": "{{apiKey}}", "in": "query" if sch.get("in") == "query" else "header"}
+            env["vars"].append({"key": "apiKey", "value": "", "secret": True, "enabled": True})
+        elif t == "oauth2":
+            flows = sch.get("flows") or {}
+            flow = flows.get("clientCredentials") or flows.get("authorizationCode") or flows.get("password") or {}
+            grant = "client_credentials" if "clientCredentials" in flows else "authorization_code" if "authorizationCode" in flows else "password"
+            col["auth"] = {"type": "oauth2", "grant": grant, "token_url": flow.get("tokenUrl", ""), "auth_url": flow.get("authorizationUrl", ""),
+                           "client_id": "{{clientId}}", "client_secret": "{{clientSecret}}", "scope": " ".join((flow.get("scopes") or {}).keys()), "pkce": True}
+    folders = {}
+    for path, ops in (spec.get("paths") or {}).items():
+        ops = _ref(spec, ops)
+        shared = ops.get("parameters") or []
+        for meth, op in ops.items():
+            if meth.upper() not in METHODS or not isinstance(op, dict):
+                continue
+            name = op.get("summary") or op.get("operationId") or "%s %s" % (meth.upper(), path)
+            r = blank_request(name, meth.upper(), "{{baseUrl}}" + re.sub(r"\{(\w+)\}", r":\1", path))
+            r["description"] = op.get("description") or ""
+            if op.get("security") == []:
+                r["auth"] = {"type": "none"}        # an open endpoint in a secured API
+            for prm in shared + (op.get("parameters") or []):
+                prm = _ref(spec, prm)
+                ex = prm.get("example", example_of(spec, prm.get("schema") or {k: prm[k] for k in ("type", "enum", "default", "format") if k in prm}))
+                ex = "" if ex is None else str(ex).lower() if isinstance(ex, bool) else str(ex)
+                row = {"key": prm.get("name", ""), "value": ex, "enabled": bool(prm.get("required"))}
+                where = prm.get("in")
+                if where == "path":
+                    r["path_vars"] = r.get("path_vars", []) + [dict(row, enabled=True)]
+                elif where == "query":
+                    r["params"].append(row)
+                elif where == "header":
+                    r["headers"].append(row)
+                elif where == "body":            # Swagger 2
+                    r["body"] = {"mode": "json", "text": json.dumps(example_of(spec, prm.get("schema")), indent=2), "form": []}
+            rb = _ref(spec, op.get("requestBody") or {})
+            content = rb.get("content") or {}
+            if content:
+                ctype = next((c for c in content if "json" in c), next(iter(content)))
+                media = content[ctype] or {}
+                ex = media.get("example")
+                if ex is None and isinstance(media.get("examples"), dict) and media["examples"]:
+                    ex = _ref(spec, next(iter(media["examples"].values()))).get("value")
+                if ex is None:
+                    ex = example_of(spec, media.get("schema"))
+                if "json" in ctype:
+                    r["body"] = {"mode": "json", "text": json.dumps(ex, indent=2), "form": []}
+                elif "x-www-form-urlencoded" in ctype and isinstance(ex, dict):
+                    r["body"] = {"mode": "form", "text": "", "form": [{"key": k, "value": str(v), "enabled": True} for k, v in ex.items()]}
+                elif "multipart" in ctype and isinstance(ex, dict):
+                    r["body"] = {"mode": "multipart", "text": "", "form": [{"key": k, "value": str(v), "enabled": True, "type": "text"} for k, v in ex.items()]}
+                else:
+                    r["body"] = {"mode": "text", "text": ex if isinstance(ex, str) else json.dumps(ex), "form": [], "content_type": ctype}
+            responses = op.get("responses") or {}
+            ok = next((c for c in responses if str(c).startswith("2")), None)
+            r["checks"] = [{"kind": "status", "op": "eq", "value": str(ok) if ok else "2xx", "enabled": True}]
+            if ok:
+                resp = _ref(spec, responses[ok])
+                schema = None
+                if "content" in resp:
+                    jc = next((c for c in resp["content"] if "json" in c), None)
+                    schema = (resp["content"][jc] or {}).get("schema") if jc else None
+                elif "schema" in resp:
+                    schema = resp["schema"]
+                if schema:
+                    r["checks"].append({"kind": "schema", "op": "valid", "schema": inline_schema(spec, schema), "enabled": True})
+                    r["examples"] = [{"name": "Example %s" % ok, "status": int(ok) if str(ok).isdigit() else 200, "reason": resp.get("description", ""),
+                                      "headers": [["Content-Type", "application/json"]], "body": json.dumps(example_of(spec, schema), indent=2)}]
+            tag = (op.get("tags") or ["Other"])[0]
+            if tag not in folders:
+                folders[tag] = {"id": new_id(), "name": tag, "folder": True, "items": [], "auth": {"type": "inherit"},
+                                "pre_script": "", "test_script": ""}
+            folders[tag]["items"].append(r)
+    col["items"] = list(folders.values()) if len(folders) > 1 else (list(folders.values())[0]["items"] if folders else [])
+    return col, env
+
+
+# ── JSON schema (the parts APIs use) ─────────────────────────────────────
+def validate_schema(value, schema, path="$", errors=None, depth=0):
+    """Problems with value against a JSON schema: type, required, properties, items, enum, const,
+    min/max (length, items, value), pattern, nullable, allOf/anyOf/oneOf, additionalProperties: false."""
+    errors = [] if errors is None else errors
+    if depth > 40 or not isinstance(schema, dict) or len(errors) > 20:
+        return errors
+    if value is None and (schema.get("nullable") or "null" in (schema.get("type") if isinstance(schema.get("type"), list) else [])):
+        return errors
+    t = schema.get("type")
+    types = t if isinstance(t, list) else [t] if t else []
+    actual = _jtype(value)
+    if types:
+        okt = any(actual == x or (x == "integer" and isinstance(value, int) and not isinstance(value, bool)) or
+                  (x == "number" and actual == "number") for x in types)
+        if not okt:
+            errors.append("%s should be %s, but is %s" % (path, " or ".join(types), actual))
+            return errors
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append("%s should be one of %s" % (path, json.dumps(schema["enum"])[:120]))
+    if "const" in schema and value != schema["const"]:
+        errors.append("%s should be %s" % (path, json.dumps(schema["const"])))
+    for sub in schema.get("allOf") or []:
+        validate_schema(value, sub, path, errors, depth + 1)
+    for k in ("anyOf", "oneOf"):
+        if schema.get(k):
+            good = sum(1 for sub in schema[k] if not validate_schema(value, sub, path, [], depth + 1))
+            if good == 0 or (k == "oneOf" and good > 1):
+                errors.append("%s doesn't match %s the allowed shapes" % (path, "any of" if good == 0 else "exactly one of"))
+    if isinstance(value, dict):
+        for req in schema.get("required") or []:
+            if req not in value:
+                errors.append("%s is missing %r" % (path, req))
+        props = schema.get("properties") or {}
+        for k, v in value.items():
+            if k in props:
+                validate_schema(v, props[k], "%s.%s" % (path, k), errors, depth + 1)
+            elif schema.get("additionalProperties") is False:
+                errors.append("%s has an unexpected field %r" % (path, k))
+            elif isinstance(schema.get("additionalProperties"), dict):
+                validate_schema(v, schema["additionalProperties"], "%s.%s" % (path, k), errors, depth + 1)
+    if isinstance(value, list):
+        if isinstance(schema.get("items"), dict):
+            for i, v in enumerate(value[:200]):
+                validate_schema(v, schema["items"], "%s[%d]" % (path, i), errors, depth + 1)
+        if "minItems" in schema and len(value) < schema["minItems"]:
+            errors.append("%s should have at least %d items" % (path, schema["minItems"]))
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            errors.append("%s should have at most %d items" % (path, schema["maxItems"]))
+    if isinstance(value, str):
+        if "minLength" in schema and len(value) < schema["minLength"]:
+            errors.append("%s is shorter than %d characters" % (path, schema["minLength"]))
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            errors.append("%s is longer than %d characters" % (path, schema["maxLength"]))
+        if schema.get("pattern"):
+            try:
+                if not re.search(schema["pattern"], value):
+                    errors.append("%s doesn't match %s" % (path, schema["pattern"]))
+            except re.error:
+                pass
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            errors.append("%s is below %s" % (path, schema["minimum"]))
+        if "maximum" in schema and value > schema["maximum"]:
+            errors.append("%s is above %s" % (path, schema["maximum"]))
+    return errors

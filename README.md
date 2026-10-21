@@ -67,6 +67,11 @@ on the start page. **Blue dark**, **Light** and **Match system** are in
 - **Projects**: open, clone or import a code project; edit files, run
   commands, and commit, pull and push with Git; let the AI read, change
   and test the code with your approval. See [Projects](#projects) below.
+- **API**: a Postman-style API client: collections and folders, every body
+  and auth type, pre-request and test scripts (`pm.*`), a collection runner
+  with reports, OpenAPI / Postman / curl import, WebSocket and SSE. It also
+  runs your dev server and checks the endpoints in your code against the
+  docs. See [API](#api) below.
 - **Library**: a place to keep **documents** (reference material the AI
   can read) and **templates** (examples of how answers should be laid out).
   See [Library](#library) below.
@@ -187,6 +192,102 @@ its files stay where they are.
 Coding works best with a model that's good at tool calling, such as
 `qwen2.5-coder:14b`, `qwen3:14b` or larger. Small models (7–8B) manage
 simple fixes but often lose track in multi-step changes.
+
+## API
+
+The **API** screen is a full API client, like Postman, built into the app.
+Pick a **Project** at the top to keep its collections, environments and
+history with that project, or leave it on *No project* for global ones.
+
+**Requests.** Each request opens in its own tab (`Ctrl+T` new, `Ctrl+W`
+close, `Ctrl+Enter` send, `Ctrl+S` save). A dot on a tab means unsaved
+changes. Every request has:
+
+- **Params**: query parameters, and path variables for URLs like
+  `/users/:id`. Pasting a URL with `?a=1` fills in the table.
+- **Auth**: inherit from the folder or collection, none, bearer token,
+  basic, API key (header or query), Digest, **OAuth 2.0** (client
+  credentials, password, or authorization code with PKCE, which signs in
+  in your browser) and **AWS Signature v4**. OAuth tokens are kept,
+  refreshed and reused automatically.
+- **Headers** and **Body**: JSON, text, XML, `x-www-form-urlencoded`,
+  `form-data` with files, a binary file, or **GraphQL** (query plus
+  variables).
+- **Scripts**: pre-request and test scripts using Postman's `pm.*` API
+  (`pm.test`, `pm.expect`, `pm.response`, `pm.environment.set`,
+  `pm.setNextRequest`…). There are snippets for the common cases. Scripts
+  run in a sandbox with no network access. With no environment selected,
+  `pm.environment` reads and writes globals so values still carry over.
+- **Checks**: no-code tests: status, response time, a header, body text, a
+  JSON field (`data[0].id` equals, exists, is a type, has a length…) or a
+  **JSON schema**. *Checks from this response* writes them for you.
+- **Settings**: per-request redirects, TLS checking, cookies and timeout.
+- **Examples**: *Save example* on a response keeps it with the request, and
+  it's exported with the collection.
+
+The response shows the status, time and size, then the body (JSON is
+highlighted; *Find in body* searches it), headers, cookies, test results,
+the scripts' console output, and the request exactly as sent. **Ask AI**
+opens a chat about it; the file button saves the body.
+
+**Collections** hold folders and requests; drag them to reorder or move
+them into a folder. A collection or folder can set auth and scripts that
+everything inside inherits, and a collection has its own **variables**.
+Variables are written `{{name}}` and resolve in this order, lowest first:
+globals, collection, environment, data file row, values set by scripts.
+**Variables** at the top edits environments (values can be marked secret,
+and are masked in reports) and globals. The dynamic variables `{{$guid}}`,
+`{{$timestamp}}`, `{{$isoTimestamp}}`, `{{$randomInt}}` and
+`{{$randomEmail}}` work too.
+
+**Running a collection** (or a folder): set iterations, a delay, a **CSV or
+JSON data file** (one iteration per row, its columns become variables) and
+*stop at the first failure*. Results stream in as each request finishes;
+download the report as **HTML**, **JUnit XML** (for CI) or JSON. Runs in a
+project are added to its **Tests** list. `pm.setNextRequest("name")` jumps
+to another request and `pm.setNextRequest(null)` ends the run.
+
+The same runs work from the command line, for CI:
+
+```
+python -m vscode_assistant.apirun my.postman_collection.json -e env.json \
+    -d users.csv -n 3 --folder Users --bail --junit report.xml --html report.html
+```
+
+**Import** takes a curl command (also by pasting it into the URL box), a
+Postman collection or environment (v2.1), or an **OpenAPI 3 / Swagger 2**
+spec in JSON or YAML. A spec becomes a collection with a folder per tag,
+example bodies, auth from its security schemes and a schema check on every
+request. **Code** (`<>`) turns a request into curl, Python, JavaScript,
+Java, C#, Go or PowerShell.
+
+**Sharing with the team.** In a project, *Share with the team through Git*
+(in a collection's menu) stores it in the project's `.api` folder in
+Postman format, so it's committed with the code and anyone, in this app or
+Postman, can open it. Environments and secrets stay on your computer.
+
+**Cookies** that servers set are kept per project and sent back, like a
+browser; **Cookies** at the top lists and deletes them. **Settings** has the
+default timeout, redirects, TLS checking (turn it off for self-signed local
+servers), a proxy and a client certificate for mutual TLS.
+
+**WebSocket and SSE.** Choose *WebSocket* or *SSE* in the method list (or
+**New**) to connect, send messages and watch what comes back, with custom
+headers and auth.
+
+**Your dev server and its endpoints.** In a project, the bar above the
+collections starts and stops the dev server (its command and address are
+detected; change them if needed) and shows its log. `{{baseUrl}}` falls
+back to the server's address when nothing else sets it. **Endpoints** finds
+the routes your code defines (Express, FastAPI, Flask, Django, Spring,
+JAX-RS, ASP.NET, Go, Rails, Laravel and OpenAPI files), lets you try each
+one, and **Compare with docs** lists endpoints missing from the
+documentation and documented ones that no longer exist.
+
+**The AI** can use all of this in a project chat: start the server, call
+endpoints (anything other than GET asks first), run a collection and read
+its report, and suggest tests. Reading from a local server (GET, HEAD, OPTIONS) runs
+straight away; any other request, or one to another machine, asks first.
 
 ## Library
 
@@ -408,6 +509,7 @@ tool calls.
 - `Ctrl+B` collapses or expands the sidebar
 - `Tab` / `Shift+Tab` indent and unindent in the Projects editor
 - `Ctrl+Enter` commits in the commit message box
+- `Ctrl+Enter` sends, `Ctrl+S` saves, `Ctrl+T` opens and `Ctrl+W` closes a request tab in API
 
 ## Files
 
@@ -419,6 +521,12 @@ vscode_assistant/static/vault.js   the encrypted password vault (Web Crypto, in 
 vscode_assistant/static/projects.js  the Projects workspace (files, editor, Git, terminal)
 vscode_assistant/engine.py         the chat + tool loop
 vscode_assistant/projects.py       projects: file access, the AI's coding tools, commands, undo
+vscode_assistant/api.py            API collections, variables, auth, sending, import/export, code snippets
+vscode_assistant/apirun.py         the collection runner, its reports, and the command-line runner
+vscode_assistant/realtime.py       WebSocket and SSE connections for the API screen
+vscode_assistant/tasks.py          Build / Run / Test buttons for Maven, Gradle, NetBeans Ant, npm and more
+vscode_assistant/static/apiview.js the API screen
+vscode_assistant/static/pmsandbox.js  the sandbox that runs pm.* scripts
 vscode_assistant/testlog.py        the Tests list: test runs, their results, and suggested tests
 vscode_assistant/gitops.py         Git commands (status, diff, commit, pull, push, branches)
 vscode_assistant/providers.py      Ollama + OpenAI-compatible clients (streaming, tool calls)

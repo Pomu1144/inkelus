@@ -463,8 +463,9 @@ class Project:
                 names = [c["name"] for c in self.manager.api.scope(self.id)["collections"]]
                 raise ToolError("No API collection called %r. Saved collections: %s" % (a.get("name"), ", ".join(names) or "none"))
             vals, _ = self.api_vars()
-            return {"kind": "api_run", "name": col["name"], "requests": ["%s %s" % (r["method"], r["name"]) for r in col["requests"]],
-                    "safe": all(apimod.is_safe(r, vals) for r in col["requests"])}
+            reqs = apimod.requests_in(col)
+            return {"kind": "api_run", "name": col["name"], "requests": ["%s %s" % (r["method"], r["name"]) for r in reqs],
+                    "safe": all(apimod.is_safe(r, vals) for r in reqs)}
         if name == "start_server":
             cfg = self.server_config()
             cmd = str(a.get("command") or cfg["command"]).strip()
@@ -748,12 +749,13 @@ class Project:
                 " (missing variables: %s)" % ", ".join(res["missing"]) if res["missing"] else "", hdr, apimod.pretty_body(res))
             return apimod.mask(text, secrets)
         if name == "run_api_collection":
+            from . import apirun
             col = self.find_collection(a.get("name"))
-            vals, secrets = self.api_vars()
-            t0 = time.time()
-            results, text = apimod.run_collection(col, vals, secrets)
-            failed = sum(1 for r in results if not r["pass"])
-            m.tests.add_run(self.id, "API: " + col["name"], 1 if failed else 0, text, "ai", time.time() - t0)
+            env = m.api.env(self.id)
+            rep = apirun.Runner(m.api, self.id, getattr(m, "script_runner", None),
+                                defaults={"baseUrl": self.server_config()["url"].rstrip("/")}).run(col, env)
+            text = apirun.text_report(rep, apimod.variables(env)[1])
+            m.tests.add_run(self.id, "API: " + col["name"], 1 if rep["failed"] else 0, text, "ai", rep["seconds"])
             return text
         if name == "start_server":
             cfg = self.server_config()
