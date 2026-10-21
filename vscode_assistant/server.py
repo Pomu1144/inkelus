@@ -765,11 +765,13 @@ class Handler(BaseHTTPRequestHandler):
                 s = J.servers.get(pid)
                 out["is_java"] = J.is_java_project(proj.root)
                 out["server"] = s.info() if s else stopped("java")
-                ts, lint = h.ts.servers.get(pid), h.ts.linters.get(pid)
+                ts, lint, ng = h.ts.servers.get(pid), h.ts.linters.get(pid), h.ts.angular.get(pid)
                 out["ts"].update({"is_ts": h.ts.is_ts_project(proj.root), "server": ts.info() if ts else stopped("ts"),
-                                  "eslint": lint.info() if lint else stopped("eslint"), "uses_eslint": h.ts.uses_eslint(proj.root)})
+                                  "eslint": lint.info() if lint else stopped("eslint"), "uses_eslint": h.ts.uses_eslint(proj.root),
+                                  "is_angular": h.ts.is_angular(proj.root), "ng": ng.info() if ng else stopped("ng"),
+                                  "test_runner": h.ts.test_runner(proj.root)})
             return self.ok(out)
-        if b.get("lang") in ("ts", "eslint"):
+        if b.get("lang") in ("ts", "eslint", "ng"):
             return self.api_ts(h, pid, proj, b)
         act = b.get("action")
         if act == "setup":
@@ -825,13 +827,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.ok({"server": T.server(pid, proj.root).info()} if act == "restart" else {})
             if act == "test":
                 cmd = T.test_command(proj.root, str(b.get("path") or ""), b.get("name") or None)
-                return self.ok({"command": cmd}) if cmd else self.fail(400, "This project has no Vitest or Jest to run tests with.")
+                return self.ok({"command": cmd}) if cmd else self.fail(400, "This project has no Vitest, Jest or Karma to run tests with.")
             if act == "prettier":
                 full = proj.resolve(str(b.get("path") or ""), allow_root=False)
                 return self.ok({"text": T.prettier(proj.root, proj.rel(full), str(b.get("text") or ""))})
             s = T.for_lang(lang, pid)
             if not s or s.state in ("stopped", "error"):
-                return self.fail(409, "The %s language server isn't running." % ("ESLint" if lang == "eslint" else "TypeScript"))
+                return self.fail(409, "The %s language server isn't running." % {"eslint": "ESLint", "ng": "Angular"}.get(lang, "TypeScript"))
             if act == "sync":
                 s.sync(b.get("op"), str(b.get("uri") or ""), b.get("text"), b.get("version"))
                 return self.ok()

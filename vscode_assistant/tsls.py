@@ -34,13 +34,16 @@ LANGUAGE_IDS = {"ts": "typescript", "mts": "typescript", "cts": "typescript", "t
                 "js": "javascript", "mjs": "javascript", "cjs": "javascript", "jsx": "javascriptreact"}
 
 
-def node_version(node):
+def node_version(node, full=False):
+    """Major version of a node executable (or (major, minor, patch) with full=True); 0 if it doesn't run."""
     try:
         out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=20).stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        return 0
-    m = re.match(r"v(\d+)", out)
-    return int(m.group(1)) if m else 0
+        return (0, 0, 0) if full else 0
+    m = re.match(r"v(\d+)\.(\d+)\.(\d+)", out)
+    if not m:
+        return (0, 0, 0) if full else 0
+    return tuple(int(x) for x in m.groups()) if full else int(m.group(1))
 
 
 def find_node(extra=""):
@@ -97,6 +100,20 @@ class Tools:
             self._node = find_node(self.settings.get("node_path") or "")
         return self._node
 
+    def angular_version(self):
+        """The newest Angular language server this Node can run (it loads the project's own Angular language
+        service when the project has one, so it suits older Angular versions too)."""
+        v = node_version(self.node()[0], full=True) if self.node()[0] else (0, 0, 0)
+        if v >= (22, 22, 3):
+            return "22.2.3"
+        if v >= (20, 19, 0):
+            return "21.2.25"
+        return "19.2.4"
+
+    def ng_cli(self):
+        p = os.path.join(self.base, "node_modules", "@angular", "language-server", "index.js")
+        return p if os.path.isfile(p) else None
+
     def server_version(self):
         # typescript-language-server 5 needs Node 20; 4.4 still runs on Node 18
         return "5.3.0" if self.node()[1] >= 20 else "4.4.1"
@@ -134,7 +151,7 @@ class Tools:
             problem = "Node.js wasn't found. Install Node.js 18 or newer (or set where it is in Settings › TypeScript)."
         elif major < 18:
             problem = "Node.js %d was found, but the TypeScript tools need Node.js 18 or newer." % major
-        return {"node": node, "node_version": major, "installed": self.installed(), "eslint": bool(self.eslint_cli()),
+        return {"node": node, "node_version": major, "installed": self.installed(), "eslint": bool(self.eslint_cli()), "angular": bool(self.ng_cli()),
                 "server": self.server_version(), "busy": self.busy, "error": self.error, "problem": problem}
 
     def install(self):
@@ -155,7 +172,7 @@ class Tools:
                 self.publish({"type": "java_setup", "lang": "ts", "label": "Installing the TypeScript tools with npm…", "done": 0, "total": 0})
                 out = subprocess.run([npm, "install", "--no-audit", "--no-fund", "--loglevel=error", "--prefix", self.base,
                                       "typescript-language-server@" + self.server_version(), "typescript@" + TS_FALLBACK,
-                                      "vscode-langservers-extracted@" + ESLINT_LS],
+                                      "vscode-langservers-extracted@" + ESLINT_LS, "@angular/language-server@" + self.angular_version()],
                                      capture_output=True, text=True, timeout=900, cwd=self.base,
                                      creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
                 if out.returncode != 0:
@@ -330,19 +347,86 @@ class EslintServer(TsServer):
         return javals.Server._server_request(self, method, params)
 
 
+class AngularServer(TsServer):
+    """Angular's language server: templates (.html files and inline templates) and component errors, next to
+    the TypeScript server. It uses the project's own @angular/language-service and TypeScript when it has them."""
+    LANG, LABEL = "ng", "Angular"
+    PAGE_METHODS = {"textDocument/completion", "textDocument/hover", "textDocument/signatureHelp", "textDocument/definition",
+                    "textDocument/typeDefinition", "textDocument/references", "textDocument/prepareRename", "textDocument/rename",
+                    "textDocument/codeAction", "codeAction/resolve"}
+    PAGE_COMMANDS = set()
+    WATCH = re.compile(r".*\.(ts|html)$|(tsconfig.*|angular)\.json$")
+
+    def language_id(self, uri):
+        return "html" if uri.lower().endswith(".html") else "typescript"
+
+    def start(self):
+        with self.lock:
+            if self.state in ("starting", "importing", "ready"):
+                return
+            node, _major = self.tools.node()
+            cli = self.tools.ng_cli()
+            if not node or not cli:
+                raise LspError("Set up Angular support first.")
+            own = local_bin(self.root, "typescript", "package.json")
+            ts_probe = [os.path.dirname(os.path.dirname(own))] if own else []
+            ng_own = local_bin(self.root, "@angular", "language-service", "package.json")
+            ng_probe = [os.path.dirname(os.path.dirname(os.path.dirname(ng_own)))] if ng_own else []
+            mine = os.path.join(self.tools.base, "node_modules")
+            cmd = [node, cli, "--stdio", "--tsProbeLocations", ",".join(ts_probe + [mine]),
+                   "--ngProbeLocations", ",".join(ng_probe + [os.path.join(mine, "@angular", "language-server", "node_modules"), mine]),
+                   "--includeCompletionsWithSnippetText", "--includeAutomaticOptionalChainCompletions"]
+            flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         cwd=self.root, creationflags=flags)
+            self.lsp = javals.Lsp(self.proc, self._notify, self._server_request)
+            self._set("starting", "Starting the Angular language server…")
+            threading.Thread(target=self._stderr, daemon=True).start()
+        threading.Thread(target=self._initialize, daemon=True).start()
+
+    def _initialize(self):
+        root_uri = file_uri(self.root)
+        try:
+            self.lsp.request("initialize", {
+                "processId": os.getpid(), "clientInfo": {"name": "VSCode Assistant"}, "rootUri": root_uri, "rootPath": self.root,
+                "capabilities": self.capabilities(), "initializationOptions": {},
+                "workspaceFolders": [{"uri": root_uri, "name": os.path.basename(self.root)}],
+            }, timeout=120)
+            self.lsp.notify("initialized", {})
+            self._set("ready", "Ready")
+            threading.Thread(target=self._watch, daemon=True).start()
+        except LspError as e:
+            self._set("error", "The Angular language server didn't start: %s %s" % (e, " ".join(self.stderr_tail[-3:])[:400]))
+
+    def _notify(self, method, params):
+        if method == "angular/projectLoadingStart":
+            self._set("ready", "Loading the Angular project…")
+        elif method == "angular/projectLoadingFinish":
+            self._set("ready", "Ready")
+        elif method.startswith("angular/"):
+            return
+        else:
+            javals.Server._notify(self, method, params)
+
+
 class TypeScript:
-    """All of it, for the Hub: the tools, and a TypeScript server and an ESLint server per project."""
+    """All of it, for the Hub: the tools, and a TypeScript, an ESLint and (for Angular) an Angular server per project."""
 
     def __init__(self, data_dir, settings, publish):
         self.data_dir, self.publish = data_dir, publish
         self.tools = Tools(data_dir, settings, publish)
-        self.servers, self.linters = {}, {}
+        self.servers, self.linters, self.angular = {}, {}, {}
 
     def server(self, project_id, root, start=True):
         s = self._get(self.servers, TsServer, project_id, root, start)
         if start and self.uses_eslint(root) and self.tools.eslint_cli():
             try:
                 self._get(self.linters, EslintServer, project_id, root, True)
+            except LspError:
+                pass
+        if start and self.is_angular(root) and self.tools.ng_cli():
+            try:
+                self._get(self.angular, AngularServer, project_id, root, True)
             except LspError:
                 pass
         return s
@@ -359,16 +443,16 @@ class TypeScript:
         return s
 
     def for_lang(self, lang, project_id):
-        return (self.linters if lang == "eslint" else self.servers).get(project_id)
+        return {"eslint": self.linters, "ng": self.angular}.get(lang, self.servers).get(project_id)
 
     def stop(self, project_id):
-        for table in (self.servers, self.linters):
+        for table in (self.servers, self.linters, self.angular):
             s = table.pop(project_id, None)
             if s:
                 s.stop()
 
     def stop_all(self):
-        for table in (self.servers, self.linters):
+        for table in (self.servers, self.linters, self.angular):
             for s in list(table.values()):
                 try:
                     s.stop()
@@ -386,17 +470,33 @@ class TypeScript:
         return "eslint" in deps and bool(local_bin(root, "eslint", "package.json"))
 
     @staticmethod
-    def test_command(root, path, name=None):
-        """The command that runs one test file (or one test in it) with the project's Vitest or Jest."""
+    def is_angular(root):
+        pkg = project_package(root)
+        return "@angular/core" in dict(pkg.get("dependencies") or {}, **(pkg.get("devDependencies") or {})) or \
+            os.path.isfile(os.path.join(root, "angular.json"))
+
+    @staticmethod
+    def test_runner(root):
         pkg = project_package(root)
         deps = dict(pkg.get("dependencies") or {}, **(pkg.get("devDependencies") or {}))
+        for name in ("vitest", "jest", "karma", "react-scripts"):
+            if name in deps:
+                return name
+        return None
+
+    @staticmethod
+    def test_command(root, path, name=None):
+        """The command that runs one test file (or one test in it) with the project's Vitest, Jest or Angular's Karma."""
+        runner = TypeScript.test_runner(root)
         q = _quote
         sel = (" -t " + q(name)) if name else ""
-        if "vitest" in deps:
+        if runner == "karma":         # Angular CLI + Karma/Jasmine runs whole files; it can't pick one test by name
+            return "npx ng test --watch=false --browsers=ChromeHeadless --include %s" % q(path)
+        if runner == "vitest":
             return "npx vitest run %s%s" % (q(path), sel)
-        if "jest" in deps:
+        if runner == "jest":
             return "npx jest %s%s" % (q(path), sel)
-        if "react-scripts" in deps:
+        if runner == "react-scripts":
             return "npx react-scripts test --watchAll=false %s%s" % (q(path), sel)
         return None
 

@@ -243,7 +243,7 @@ Drag the top edge of the bottom panel to make it taller.
   JUnit) from the IDE's settings that `nbproject/private` points to. Ant
   itself is found inside NetBeans too.
 
-## TypeScript, JavaScript and React
+## TypeScript, JavaScript, React and Angular
 
 TypeScript and JavaScript files (`.ts`, `.tsx`, `.js`, `.jsx`) get the same
 help as Java, from typescript-language-server: the TypeScript compiler's own
@@ -272,7 +272,20 @@ JavaScript** if it isn't on the PATH.
 - **Run test** links above Vitest and Jest tests (`it`, `test`, `describe`),
   run in the Terminal and recorded on the Tests list.
 
-Debugging a React app in the browser is best done in Chrome's DevTools.
+**Angular.** In an Angular project the Angular language server runs next to
+TypeScript's and uses your project's own Angular language service:
+
+- **Templates** (`.html` files and inline `template:` strings) get errors as
+  you type (the same as `ng build`), completion of the component's fields
+  and methods, hover, and **go to definition** from the template to the
+  component.
+- **Run the tests in a spec file** with `ng test` (Karma runs whole files;
+  results are shown on the Tests list). Projects using Jest or Vitest get a
+  link per test.
+- Prettier formats templates too when the project has it.
+
+Debugging a React or Angular app in the browser is best done in Chrome's
+DevTools.
 
 ## API
 
@@ -611,7 +624,7 @@ vscode_assistant/static/javaide.js the Java and TypeScript features, and the Jav
 vscode_assistant/static/vendor/monaco/  the Monaco editor (MIT licence, see its LICENSE and ThirdPartyNotices.txt)
 vscode_assistant/javals.py         the Java tools: finds a JDK, downloads and runs the Eclipse Java language server
 vscode_assistant/javadebug.py      the Java debugger (talks to the java-debug plugin)
-vscode_assistant/tsls.py           TypeScript/JavaScript: typescript-language-server, ESLint, Prettier, Vitest/Jest
+vscode_assistant/tsls.py           TypeScript/JavaScript: typescript-language-server, ESLint, Angular, Prettier, test runners
 vscode_assistant/engine.py         the chat + tool loop
 vscode_assistant/projects.py       projects: file access, the AI's coding tools, commands, undo
 vscode_assistant/api.py            API collections, variables, auth, sending, import/export, code snippets

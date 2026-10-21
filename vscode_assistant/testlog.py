@@ -75,6 +75,12 @@ def parse(output, code):
             counts["errors"] = err
         if skip:
             counts["skipped"] = skip
+    k = re.findall(r"Executed (\d+) of (\d+)(?: \((\d+) FAILED\))?(?: \(skipped (\d+)\))?", out)       # Karma (Angular)
+    if k and not junit:
+        done, _total, fail, skip = (int(x or 0) for x in k[-1])
+        counts = {"passed": done - fail, "failed": fail}
+        if skip:
+            counts["skipped"] = skip
     g = re.search(r"(\d+) tests? completed(?:, (\d+) failed)?(?:, (\d+) skipped)?", out)   # Gradle
     if g and not junit:
         done, fail, skip = int(g.group(1)), int(g.group(2) or 0), int(g.group(3) or 0)
@@ -102,7 +108,8 @@ def parse(output, code):
     failures = []
     for rx in (r"^\[ERROR\]\s+(\w[\w.$]*\.\w+(?:\(\))?)(?::\d+)?\s", r"^\s*(?:\[junit\]\s+)?Testcase:\s+(\S+?\([^)]*\)):\s+(?:FAILED|Caused an ERROR)",
                r"^(\S+ > .+?) FAILED$", r"^FAILED\s+(\S+)", r"^\s*--- FAIL:\s+(\S+)", r"^FAIL:\s+(\S+(?: \([^)]*\))?)", r"^ERROR:\s+(\S+(?: \([^)]*\))?)",
-               r"^\s*[✕✗×]\s+(.+?)(?:\s+\(\d+\s*ms\))?$", r"^\s*FAIL\s+(\S+)", r"^test (\S+) \.\.\. FAILED"):
+               r"^\s*[✕✗×]\s+(.+?)(?:\s+\(\d+\s*ms\))?$", r"^\s*FAIL\s+(\S+)", r"^test (\S+) \.\.\. FAILED",
+               r"^\w[\w ]*? [\d.]+ \([^)]*\)\s+(?!Executed )(.+?) FAILED$"):
         for name in re.findall(rx, out, re.M):
             name = name.strip()
             if name and not name.startswith("(") and name not in failures:

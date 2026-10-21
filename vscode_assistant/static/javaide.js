@@ -11,7 +11,7 @@ window.VAJava = function (app, Projects) {
   const P = Projects.state;
   const J = {
     tools: null, info: {},            // Java: project id -> {state, message, root_uri, counts}
-    ts: { tools: null, info: {}, eslint: {}, uses: {}, progress: "" },   // TypeScript and ESLint, the same per project
+    ts: { tools: null, info: {}, eslint: {}, ng: {}, uses: {}, isNg: {}, runner: {}, progress: "" },   // TypeScript, ESLint and Angular, the same per project
     diags: {},                        // project id -> lang -> {uri: [lsp diagnostic]}
     versions: {},                     // lsp uri -> version sent
     opened: new Set(),                // "lang uri" the servers have open
@@ -24,12 +24,27 @@ window.VAJava = function (app, Projects) {
   // ── languages ────────────────────────────────────────────────────────
   const isJavaPath = p => /\.java$/i.test(p || "");
   const isTsPath = p => /\.(tsx?|mts|cts|jsx?|mjs|cjs)$/i.test(p || "");
-  const langOf = f => (!f ? null : f.jdt ? "java" : isJavaPath(f.path) ? "java" : isTsPath(f.path) ? "ts" : null);
-  const LABEL = { java: "Java", ts: "TypeScript", eslint: "ESLint" };
-  const infoOf = (id, lang) => (lang === "ts" ? J.ts.info : lang === "eslint" ? J.ts.eslint : J.info)[id || pid()];
+  const isNgTemplate = f => /\.html$/i.test(f.path || "") && J.ts.isNg[f.project];
+  const langOf = f => (!f ? null : f.jdt ? "java" : isJavaPath(f.path) ? "java" : isTsPath(f.path) ? "ts" : isNgTemplate(f) ? "ng" : null);
+  const LABEL = { java: "Java", ts: "TypeScript", eslint: "ESLint", ng: "Angular" };
+  const tableOf = lang => ({ ts: J.ts.info, eslint: J.ts.eslint, ng: J.ts.ng })[lang] || J.info;
+  const infoOf = (id, lang) => tableOf(lang)[id || pid()];
   const running = (id, lang) => ["ready", "importing"].includes((infoOf(id, lang || "java") || {}).state);
-  // the servers a file talks to: TypeScript files also go to ESLint when the project uses it
-  const serversFor = f => { const l = langOf(f); return l === "ts" ? ["ts", "eslint"] : l ? [l] : []; };
+  // the servers a file talks to: TypeScript files also go to ESLint when the project uses it, and to Angular's
+  // server in an Angular project (inline templates, component errors); Angular templates only to Angular's
+  const serversFor = f => {
+    const l = langOf(f);
+    return l === "ts" ? ["ts", "eslint"].concat(J.ts.isNg[f.project] ? ["ng"] : []) : l ? [l] : [];
+  };
+  // inside an Angular inline template (template: `…`) the Angular server answers instead of TypeScript's
+  function inInlineTemplate(model, position) {
+    const before = model.getValueInRange({ startLineNumber: 1, startColumn: 1, endLineNumber: position.lineNumber, endColumn: position.column });
+    const i = before.lastIndexOf("template:");
+    if (i < 0) return false;
+    const rest = before.slice(i + 9), m = /^\s*`/.exec(rest);
+    return !!m && !rest.slice(m[0].length).includes("`");
+  }
+  const at = (d, model, position) => (d && d.lang === "ts" && J.ts.isNg[d.project] && running(d.project, "ng") && inInlineTemplate(model, position) ? Object.assign({}, d, { lang: "ng" }) : d);
 
   // ── paths and URIs ───────────────────────────────────────────────────
   // the same escaping as Python's quote(path, safe="/:") on the server
@@ -54,7 +69,11 @@ window.VAJava = function (app, Projects) {
   const toRange = r => new (M().Range)(r.start.line + 1, r.start.character + 1, r.end.line + 1, r.end.character + 1);
   const toPos = p => ({ line: p.lineNumber - 1, character: p.column - 1 });
 
+  // what Angular's server doesn't answer (TypeScript's does, for the .ts side)
+  const NG_NO = new Set(["textDocument/documentSymbol", "textDocument/documentHighlight", "textDocument/formatting", "textDocument/rangeFormatting",
+    "textDocument/implementation", "workspace/symbol", "completionItem/resolve", "textDocument/foldingRange", "textDocument/selectionRange"]);
   async function call(method, params, id, timeout, lang) {
+    if (lang === "ng" && NG_NO.has(method)) return null;
     return (await api("POST", "java", { action: "call", lang: lang || "java", project: id || pid(), method, params, timeout })).result;
   }
   const post = (lang, body) => api("POST", "java", Object.assign({ lang }, body));
@@ -66,7 +85,7 @@ window.VAJava = function (app, Projects) {
     const r = await api("GET", "java?project=" + encodeURIComponent(id));
     if (!J.reset) J.reset = new Set();
     const t = r.ts || {};
-    for (const [lang, info] of [["java", r.server], ["ts", t.server], ["eslint", t.eslint]]) {
+    for (const [lang, info] of [["java", r.server], ["ts", t.server], ["eslint", t.eslint], ["ng", t.ng]]) {
       if (info && ["ready", "importing"].includes(info.state) && !J.reset.has(lang + id)) {
         J.reset.add(lang + id);   // the server may still hold copies of files from before this page loaded
         await post(lang, { action: "sync", project: id, op: "reset", uri: "" });
@@ -80,18 +99,29 @@ window.VAJava = function (app, Projects) {
     J.ts.info[id] = t.server;
     J.ts.eslint[id] = t.eslint;
     J.ts.uses[id] = !!t.uses_eslint;
-    J.diags[id] = { java: {}, ts: {}, eslint: {} };
-    [["java", r.server], ["ts", t.server], ["eslint", t.eslint]].forEach(([lang, info]) =>
+    J.ts.ng[id] = t.ng;
+    J.ts.isNg[id] = !!t.is_angular;
+    J.ts.runner[id] = t.test_runner;
+    ngHtmlMode(!!t.is_angular);
+    J.diags[id] = { java: {}, ts: {}, eslint: {}, ng: {} };
+    [["java", r.server], ["ts", t.server], ["eslint", t.eslint], ["ng", t.ng]].forEach(([lang, info]) =>
       ((info || {}).diagnostics || []).forEach(d => (J.diags[id][lang][d.uri] = d.items)));
     if (start && r.is_java && r.tools.installed && r.server.state === "stopped") {
       J.info[id] = (await api("POST", "java", { action: "start", project: id })).server;
     }
-    if (start && t.is_ts && t.tools.installed && t.server.state === "stopped") {
-      J.ts.info[id] = (await post("ts", { action: "start", project: id })).server;
+    if (start && t.is_ts && t.tools.installed && (t.server.state === "stopped" || (t.is_angular && t.tools.angular && t.ng.state === "stopped"))) {
+      J.ts.info[id] = (await post("ts", { action: "start", project: id })).server;     // starts ESLint's and Angular's too
     }
     renderBar();
     renderProblems();
     allMarkers();
+  }
+  // in an Angular project the Angular server completes and explains templates, so Monaco's own HTML help steps aside
+  function ngHtmlMode(ng) {
+    const h = M() && M().languages.html;
+    if (!h || !h.htmlDefaults || J.ngMode === ng) return;
+    J.ngMode = ng;
+    h.htmlDefaults.setModeConfiguration(Object.assign({}, h.htmlDefaults.modeConfiguration, { completionItems: !ng, hovers: !ng, documentHighlights: !ng }));
   }
   function renderBar() {
     const id = pid(), bar = $("#javaBar");
@@ -130,6 +160,11 @@ window.VAJava = function (app, Projects) {
         "Set up TypeScript support", "One-time npm install, about 30 MB" + ((J.ts.tools || {}).node ? " · uses Node " + esc(J.ts.tools.node_version) : ""));
       const e = J.ts.eslint[id] || {};
       if (J.ts.uses[id] && (J.ts.tools || {}).installed) h += '<span class="faint tiny">ESLint ' + (e.state === "ready" ? "on" : e.state === "error" ? '<span class="jerr">' + esc(e.message) + "</span>" : esc(e.state || "off")) + "</span>";
+      if (J.ts.isNg[id] && (J.ts.tools || {}).installed) {
+        const g = J.ts.ng[id] || {};
+        h += !(J.ts.tools || {}).angular ? '<button class="btn small" data-j="ts-setup">Add Angular support</button>'
+          : '<span class="faint tiny">Angular ' + (g.state === "ready" ? (g.message && g.message !== "Ready" ? esc(g.message) : "on") : g.state === "error" ? '<span class="jerr">' + esc(g.message) + "</span>" : esc(g.state || "off")) + "</span>";
+      }
     }
     const anyReady = (isJava && running(id, "java")) || (isTs && running(id, "ts"));
     if (anyReady) h += probs || '<span class="faint">No problems</span>';
@@ -174,14 +209,14 @@ window.VAJava = function (app, Projects) {
   const SEV = d => [null, "error", "warning", "info", "hint"][d.severity || 1];
   const diagsOf = (id, uri, lang) => {
     const all = J.diags[id] || {};
-    return lang ? (all[lang] || {})[uri] || [] : ["java", "ts", "eslint"].flatMap(l => (all[l] || {})[uri] || []);
+    return lang ? (all[lang] || {})[uri] || [] : ["java", "ts", "eslint", "ng"].flatMap(l => (all[l] || {})[uri] || []);
   };
   function markersFor(id, path, model) {
     const items = diagsOf(id, lspUri(id, path));
     const S = M().MarkerSeverity;
     M().editor.setModelMarkers(model, "lsp", items.map(d => Object.assign({
       severity: { error: S.Error, warning: S.Warning, info: S.Info, hint: S.Hint }[SEV(d)], message: d.message,
-      source: d.source || (isJavaPath(path) ? "Java" : "TypeScript"), code: d.code != null ? String(d.code) : undefined,
+      source: d.source || (isJavaPath(path) ? "Java" : /\.html$/i.test(path) ? "Angular" : "TypeScript"), code: d.code != null ? String(d.code) : undefined,
       tags: (d.tags || []).map(t => (t === 1 ? M().MarkerTag.Unnecessary : M().MarkerTag.Deprecated)),
     }, { startLineNumber: d.range.start.line + 1, startColumn: d.range.start.character + 1, endLineNumber: d.range.end.line + 1, endColumn: d.range.end.character + 1 })));
   }
@@ -409,15 +444,17 @@ window.VAJava = function (app, Projects) {
     return lenses;
   }
   // Vitest / Jest: it("…") and test("…") (describe blocks run all their tests)
-  function tsLenses(model, path) {
+  // Angular's Karma runs whole files only, so there it's one link per file
+  function tsLenses(model, path, project) {
     if (!/\.(test|spec)\.[cm]?[jt]sx?$/i.test(path) && !/(^|\/)__tests__\//.test(path)) return [];
     const lines = model.getValue().split("\n"), lenses = [];
+    const perTest = J.ts.runner[project] !== "karma";
     let n = 0;
     lines.forEach((l, i) => {
       const m = /^\s*(it|test|describe)(?:\.(?:only|concurrent))?\s*\(\s*(['"`])((?:\\.|(?!\2).)*)\2/.exec(l);
       if (!m) return;
       if (m[1] !== "describe") n++;
-      lenses.push({ line: i + 1, items: [[m[1] === "describe" ? "▶ Run these tests" : "▶ Run test", "tstest", { path, name: m[3].replace(/\\(.)/g, "$1") }]] });
+      if (perTest) lenses.push({ line: i + 1, items: [[m[1] === "describe" ? "▶ Run these tests" : "▶ Run test", "tstest", { path, name: m[3].replace(/\\(.)/g, "$1") }]] });
     });
     if (n) lenses.unshift({ line: 1, items: [["▶ Run all " + n + " tests in this file", "tstest", { path }]] });
     return lenses;
@@ -456,18 +493,19 @@ window.VAJava = function (app, Projects) {
     const m = M();
     if (!m || J.registered) return;
     J.registered = true;
-    const L = m.languages, sel = ["java", "typescript", "javascript"];
+    ngHtmlMode(!!J.ts.isNg[pid()]);
+    const L = m.languages, sel = ["java", "typescript", "javascript", "html"];
     const doc = model => lspDocOf(model);
     const ok = model => { const d = doc(model); return d && running(d.project, d.lang) ? d : null; };
-    const ready = async model => { const d = ok(model); if (d && !d.file.jdt) await flush(d.file); return d; };
+    const ready = async (model, position) => { let d = ok(model); if (d && !d.file.jdt) await flush(d.file); if (d && position) d = at(d, model, position); return d; };
 
     L.registerCompletionItemProvider(sel, {
       triggerCharacters: [".", "@", "#", "*", "\"", "'", "/", "<"],
       async provideCompletionItems(model, position, context) {
-        const d = await ready(model);
+        const d = await ready(model, position);
         if (!d || d.file.jdt) return { suggestions: [] };
         const ch = context && context.triggerCharacter;
-        if (ch && (d.lang === "java" ? !".@#*".includes(ch) : ch === "#" || ch === "*")) return { suggestions: [] };
+        if (ch && (d.lang === "java" ? !".@#*".includes(ch) : d.lang === "ts" ? ch === "#" || ch === "*" : ch === "#" || ch === "/")) return { suggestions: [] };
         const key = Ed().keyOfUri(model.uri);
         const r = await call("textDocument/completion", { textDocument: { uri: d.uri }, position: toPos(position),
           context: ch ? { triggerKind: 2, triggerCharacter: ch } : { triggerKind: 1 } }, d.project, 30, d.lang);
@@ -508,7 +546,7 @@ window.VAJava = function (app, Projects) {
     });
     L.registerHoverProvider(sel, {
       async provideHover(model, position) {
-        const d = await ready(model);
+        const d = await ready(model, position);
         if (!d) return null;
         const r = await call("textDocument/hover", { textDocument: { uri: d.uri }, position: toPos(position) }, d.project, 30, d.lang);
         if (!r || !r.contents) return null;
@@ -519,7 +557,7 @@ window.VAJava = function (app, Projects) {
     L.registerSignatureHelpProvider(sel, {
       signatureHelpTriggerCharacters: ["(", ",", "<"], signatureHelpRetriggerCharacters: [")"],
       async provideSignatureHelp(model, position) {
-        const d = await ready(model);
+        const d = await ready(model, position);
         if (!d || d.file.jdt) return null;
         const r = await call("textDocument/signatureHelp", { textDocument: { uri: d.uri }, position: toPos(position) }, d.project, 30, d.lang);
         if (!r || !(r.signatures || []).length) return null;
@@ -537,7 +575,7 @@ window.VAJava = function (app, Projects) {
       ["registerImplementationProvider", "textDocument/implementation"]]) {
       L[fn](sel, {
         [fn === "registerDefinitionProvider" ? "provideDefinition" : fn === "registerTypeDefinitionProvider" ? "provideTypeDefinition" : "provideImplementation"]: async (model, position) => {
-          const d = await ready(model);
+          const d = await ready(model, position);
           if (!d) return [];
           return locs(await call(method, { textDocument: { uri: d.uri }, position: toPos(position) }, d.project, 60, d.lang), d.project);
         },
@@ -545,7 +583,7 @@ window.VAJava = function (app, Projects) {
     }
     L.registerDocumentHighlightProvider(sel, {
       async provideDocumentHighlights(model, position) {
-        const d = await ready(model);
+        const d = await ready(model, position);
         if (!d) return [];
         const r = await call("textDocument/documentHighlight", { textDocument: { uri: d.uri }, position: toPos(position) }, d.project, 30, d.lang) || [];
         return r.map(h => ({ range: toRange(h.range), kind: h.kind ? h.kind - 1 : 0 }));
@@ -563,9 +601,10 @@ window.VAJava = function (app, Projects) {
     const fmt = async (model, range, options) => {
       const d = await ready(model);
       if (!d || d.file.jdt) return [];
-      if (d.lang === "ts" && !range) {          // the project's own Prettier and config, like it formats in the build
+      if ((d.lang === "ts" || d.lang === "ng") && !range) {      // the project's own Prettier and config, like it formats in the build
         const r = await post("ts", { action: "prettier", project: d.project, path: d.file.path, text: model.getValue() });
         if (r.text != null) return r.text === model.getValue() ? [] : [{ range: model.getFullModelRange(), text: r.text }];
+        if (d.lang === "ng") { toast("Formatting Angular templates needs Prettier in the project (npm install -D prettier)."); return []; }
       }
       const opt = { tabSize: options.tabSize, insertSpaces: options.insertSpaces };
       const r = range ? await call("textDocument/rangeFormatting", { textDocument: { uri: d.uri }, range: { start: toPos(range.getStartPosition()), end: toPos(range.getEndPosition()) }, options: opt }, d.project, 30, d.lang)
@@ -576,7 +615,7 @@ window.VAJava = function (app, Projects) {
     L.registerDocumentRangeFormattingEditProvider(sel, { provideDocumentRangeFormattingEdits: (model, range, options) => fmt(model, range, options) });
     L.registerRenameProvider(sel, {
       async resolveRenameLocation(model, position) {
-        const d = await ready(model);
+        const d = await ready(model, position);
         if (!d || d.file.jdt) return { rejectReason: "You can't rename here." };
         const r = await call("textDocument/prepareRename", { textDocument: { uri: d.uri }, position: toPos(position) }, d.project, 30, d.lang);
         if (!r) return { rejectReason: "This can't be renamed." };
@@ -584,7 +623,7 @@ window.VAJava = function (app, Projects) {
         return { range, text: r.placeholder || model.getValueInRange(range) };
       },
       async provideRenameEdits(model, position, newName) {
-        const d = await ready(model);
+        const d = await ready(model, position);
         if (!d) return { edits: [] };
         const edit = await call("textDocument/rename", { textDocument: { uri: d.uri }, position: toPos(position), newName }, d.project, 60, d.lang);
         if (edit) {
@@ -605,7 +644,7 @@ window.VAJava = function (app, Projects) {
             context: { diagnostics: diags, only: context.only ? [context.only] : undefined, triggerKind: context.trigger === 1 ? 1 : 2 } }, d.project, 30, lang).catch(() => []) || [];
           return r.map(a => ({ a, lang }));
         };
-        const all = (await Promise.all((d.lang === "ts" ? ["ts", "eslint"] : [d.lang]).map(ask))).flat();
+        const all = (await Promise.all((d.lang === "ts" ? serversFor(d.file) : [d.lang]).map(ask))).flat();
         return {
           actions: all.map(({ a, lang }) => ({ title: a.title, kind: a.kind || (a.command && typeof a.command === "string" ? "" : "quickfix"), isPreferred: !!a.isPreferred,
             diagnostics: context.markers.filter(mk => mk.owner === "lsp"), command: { id: "va.lsp.action", title: a.title, arguments: [a, lang] } })),
@@ -619,7 +658,7 @@ window.VAJava = function (app, Projects) {
         const d = doc(model);
         if (!d || d.file.jdt) return { lenses: [], dispose() {} };
         const lenses = [];
-        (d.lang === "java" ? javaLenses(model) : tsLenses(model, d.file.path)).forEach(l =>
+        (d.lang === "java" ? javaLenses(model) : d.lang === "ts" ? tsLenses(model, d.file.path, d.project) : []).forEach(l =>
           l.items.forEach(([title, kind, args]) => lenses.push({ range: new m.Range(l.line, 1, l.line, 1), command: { id: lensCmd[kind], title, arguments: [args] } })));
         return { lenses, dispose() {} };
       },
@@ -645,7 +684,7 @@ window.VAJava = function (app, Projects) {
     });
     // NetBeans keys, next to the VS Code ones Monaco already has
     const ed = Ed().editor, K = m.KeyMod, C = m.KeyCode;
-    const langOnly = fn => () => { const d = doc(ed.getModel()); if (d) fn(d.lang); };
+    const langOnly = fn => () => { const d = doc(ed.getModel()); if (d) fn(d.lang === "ng" ? "ts" : d.lang); };
     const trig = id => () => ed.trigger("keyboard", id, {});
     ed.addAction({ id: "va.quickfix", label: "Show fixes (Alt+Enter)", keybindings: [K.Alt | C.Enter], run: trig("editor.action.quickFix") });
     ed.addAction({ id: "va.definition", label: "Go to declaration", keybindings: [K.CtrlCmd | C.KeyB], run: trig("editor.action.revealDefinition") });
@@ -936,7 +975,7 @@ window.VAJava = function (app, Projects) {
     }
     if (ev.type !== "java") return;
     const id = ev.project, lang = ev.lang || "java";
-    const table = lang === "ts" ? J.ts.info : lang === "eslint" ? J.ts.eslint : J.info;
+    const table = tableOf(lang);
     if (ev.kind === "status") {
       const info = table[id] = Object.assign(table[id] || {}, { state: ev.state, message: ev.message });
       if (ev.state === "ready" || ev.state === "importing") {
@@ -988,10 +1027,10 @@ window.VAJava = function (app, Projects) {
         if (lang === "ts") { J.ts.tools = r.tools; J.ts.progress = "Installing…"; } else { J.tools = r.tools; J.progress = "Downloading…"; }
         renderBar();
       } else if (a === "start" || a === "restart") {
-        [...J.opened].forEach(k => { if (k.startsWith(lang + " ") || (lang === "ts" && k.startsWith("eslint "))) J.opened.delete(k); });
+        [...J.opened].forEach(k => { if (k.startsWith(lang + " ") || (lang === "ts" && /^(eslint|ng) /.test(k))) J.opened.delete(k); });
         const r = await post(lang, { action: a, project: pid() });
         if (lang === "ts") J.ts.info[pid()] = r.server; else J.info[pid()] = r.server;
-        if (lang === "ts") setTimeout(guard(() => refreshStatus(false)), 1500);   // ESLint starts next to it
+        if (lang === "ts") setTimeout(guard(() => refreshStatus(false)), 1500);   // ESLint and Angular start next to it
         renderBar();
       }
     }));
