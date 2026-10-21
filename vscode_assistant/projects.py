@@ -25,7 +25,7 @@ import threading
 import time
 import zipfile
 
-from . import gitops, testlog
+from . import gitops, library as libmod, testlog
 from .store import new_id
 
 IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "env", ".tox", ".mypy_cache",
@@ -397,9 +397,10 @@ class Project:
         a = a or {}
         if name in ("edit_file", "write_file", "delete_file"):
             rel, before, after, fmt = self._change(name, a)
+            standards = self.check_standards(name, rel, before, after)
             d = unified(rel, before, after)
             add, rem = diff_counts(d)
-            return {"kind": "diff", "path": rel, "diff": d, "added": add, "removed": rem,
+            return {"kind": "diff", "path": rel, "diff": d, "added": add, "removed": rem, "standards": standards,
                     "action": "create" if before is None else "delete" if after is None else "edit"}
         if name == "run_command":
             cmd = str(a.get("command") or "").strip()
@@ -430,6 +431,38 @@ class Project:
         if name == "git_branch":
             return {"kind": "branch", "name": str(a.get("name") or ""), "create": bool(a.get("create"))}
         return None
+
+    def check_standards(self, name, rel, before, after):
+        """Documentation standards that apply to this file. A whole-file write that misses a required section,
+        or an edit that removes one, is refused, so the AI has to follow the standard."""
+        lib = getattr(self.manager, "library", None)
+        if lib is None or after is None:
+            return []
+        out = []
+        for std in lib.standards_for_path(rel):
+            text = lib.read("standards", std)
+            r = libmod.check_document(after, text)
+            if not r["required"]:
+                continue
+            problem = ""
+            if name == "write_file" or before is None:
+                if r["missing"]:
+                    problem = "it's missing these sections: " + ", ".join(r["missing"])
+                elif not r["in_order"]:
+                    problem = "its sections aren't in the standard's order"
+            else:
+                was = libmod.check_document(before, text)
+                lost = [m for m in r["missing"] if m not in was["missing"]]
+                if lost:
+                    problem = "this edit removes these required sections: " + ", ".join(lost)
+                elif was["in_order"] and not r["in_order"]:
+                    problem = "this edit puts the sections out of the standard's order"
+            if problem:
+                raise ToolError('%s has to follow the documentation standard "%s", but %s. Write it with these '
+                                'headings, in this order: %s. The standard is in your instructions.'
+                                % (rel, std, problem, " / ".join(r["required"])))
+            out.append({"name": std, "missing": r["missing"]})
+        return out
 
     def _change(self, name, a):
         """(relative path, text before or None, text after or None, format) for a file change."""

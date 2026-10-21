@@ -74,15 +74,27 @@ on the start page. **Blue dark**, **Light** and **Match system** are in
   llama.cpp `llama-server`, vLLM, LocalAI, Jan…). Models from every server
   appear in one picker under **Settings › Model**.
 
+## Sidebar and the + menu
+
+- **Collapse the sidebar** with the button next to the app name, or
+  `Ctrl+B`, to get a strip of icons and more room. It stays the way you left
+  it. On narrow windows it starts collapsed.
+- **New chat** opens a blank conversation. It's only saved once you send a
+  message, so empty chats don't pile up.
+- The **+** in the message box opens a menu: **Upload images** (for vision
+  models), **Upload documents** (text, Markdown, code or Word; they're added
+  to *Library › Documents* and the AI reads them in this chat), **Library
+  documents and templates**, and **Work on a project**.
+
 ## Chat groups, Fast mode and the thinking indicator
 
-- **Groups.** Click **+** next to *Recents* to make a group and type its name
+- **Groups.** Click the **folder** button next to *Recents* to make a group and type its name
   (a project, a class, "Work"…). Drag chats onto a group to move them;
   chats not in a group are under **General**. Click a group's name to
-  collapse it; hover it to start a new chat in it (**+**), rename it (**✎**,
-  or double-click the name) or delete it (**✕**; its chats move back to
-  General).
-- **Fast mode.** The **⚡ Fast** button by the message box tells reasoning
+  collapse it; hover it to start a new chat in it (**+**), rename it (the
+  **pencil**, or double-click the name) or delete it (the **x**; its chats
+  move back to General).
+- **Fast mode.** The **Fast** button by the message box tells reasoning
   models (qwen3, deepseek-r1…) to skip their thinking step and answer straight
   away. It's remembered per chat and used for new chats until you switch it
   off. Ollama gets `think: false`; OpenAI-compatible servers get
@@ -111,8 +123,9 @@ Work on your code without opening another editor. **Projects** in the sidebar:
   - The bar at the top shows the branch and how many commits you are ahead
     ↑ or behind ↓ the remote. Click the branch to switch or create one.
   - **Changes** lists changed files. Click one to see its diff, untick
-    files to leave them out, press **✨ Write message** to have the AI
-    describe the changes, then **Commit**. ↺ discards a file's changes.
+    files to leave them out, press **Write message** to have the AI
+    describe the changes, then **Commit**. The **undo arrow** discards a
+    file's changes.
   - **Pull** only fast-forwards. If your branch and the remote have both
     changed, it asks whether to **merge** or **rebase**. If lines conflict,
     the files are marked: fix them (or ask the AI to), then **Continue**, or
@@ -128,18 +141,18 @@ Work on your code without opening another editor. **Projects** in the sidebar:
 
 **Tests tab.** One place for every test run and every test worth writing:
 
-- **Runs**: each test run is listed with ✓/✗ and a summary such as *2
-  passed, 1 failed*. That includes runs you start with **▶ Run**, test
+- **Runs**: each test run is listed as passed or failed with a summary such
+  as *2 passed, 1 failed*. That includes runs you start with **Run**, test
   commands you type in the Terminal, and the ones the AI runs. Click a run to
   see the failing tests by name and the full output, then **Ask the AI to fix
   these** or **Run again**. Output from pytest, unittest, Jest, Vitest, Mocha,
   `go test`, `cargo test` and simple PASS/FAIL runners is understood.
-- **Suggested**: tests to write or check. **✨ Suggest** asks the AI what's
+- **Suggested**: tests to write or check. **Suggest** asks the AI what's
   missing (it looks at the layout, the existing tests and your uncommitted
   changes). In a project chat the AI also adds suggestions on its own, e.g.
   a test that would have caught a bug it just fixed. You can add your own
-  with **+**. Each one has **Write with AI**, ▶ Run (when it has a command;
-  it's then marked passed or failed), ✓ done and ✕ dismiss.
+  with **+**. Each one has **Write with AI**, **Run** (when it has a command;
+  it's then marked passed or failed), **done** and **dismiss**.
 - The **test command** is guessed from the project (npm test, pytest, go
   test, cargo test…) and you can change it. The AI is told the command, the
   last result and the open suggestions.
@@ -177,7 +190,7 @@ simple fixes but often lose track in multi-step changes.
 
 ## Library
 
-Open **Library** in the left rail. It has two tabs:
+Open **Library** in the left rail. It has three tabs:
 
 - **Documents**: notes, specs, policies, code, anything the AI should know
   about. Create them in the editor, or click **Import…** to add text files
@@ -187,6 +200,8 @@ Open **Library** in the left rail. It has two tabs:
   headings, tables and `{{placeholders}}`; the AI copies the layout and fills
   in the blanks. Three examples come with the app: meeting notes, a bug
   report and an email.
+- **Doc standards**: your documentation templates, which the AI **must**
+  follow whenever it writes documentation. See below.
 
 In a chat, click **Library** in the header to choose:
 
@@ -201,6 +216,28 @@ folders inside your data folder (the **Folder** button opens it), so you can
 also edit them with any editor. With Ollama, the app enlarges the context
 window when documents are attached so they aren't cut off; set **Context
 (num_ctx)** under **Parameters** to choose it yourself.
+
+### Doc standards
+
+Upload your team's documentation templates (README, API reference, runbook,
+design doc…) under **Library › Doc standards** with **Import…** (Markdown,
+text or Word `.docx`), or write one with **New**. Each standard has:
+
+- **The AI must follow this standard**: on or off.
+- **Use it for**: the kind of documentation it covers, e.g. *API reference*.
+- **Project files it applies to**: patterns such as `README.md` or
+  `docs/**/*.md`.
+
+Every chat is told to follow the standards: whenever the AI writes
+documentation it uses the matching standard's sections, headings and order,
+and keeps sections that don't apply instead of dropping them. In a
+**project** it's checked as well. When the AI writes a file that matches a
+standard's patterns, its headings are compared with the standard. A new file
+or full rewrite that is missing a required section (or has them out of
+order), or an edit that removes one, is refused, and the AI is told exactly
+which headings to use. The approval dialog then shows **Follows the
+documentation standard**. A `README standard` example comes with the app,
+switched off.
 
 ## Agent browser
 
@@ -327,7 +364,7 @@ browser on your computer:
   Settings.
 - Each chat has its own sandbox.
 - By default it **asks before each page or search**: Allow, Allow all in
-  this chat, or Deny. Each step shows in the chat as a ⚙ card, which you can
+  this chat, or Deny. Each step shows in the chat as a tool card, which you can
   click to see the full result.
 
 You need a model that supports tool calling, such as qwen2.5 / qwen3,
@@ -368,6 +405,7 @@ tool calls.
 - `Enter` sends, `Shift+Enter` adds a new line
 - `Esc` stops generation (or closes a dialog)
 - `Ctrl+S` saves in the Library and Projects editors
+- `Ctrl+B` collapses or expands the sidebar
 - `Tab` / `Shift+Tab` indent and unindent in the Projects editor
 - `Ctrl+Enter` commits in the commit message box
 
@@ -389,5 +427,6 @@ vscode_assistant/agent_browser.py  the agent browser: drives a Chrome window ove
 vscode_assistant/library.py        documents + templates, and the prompt text they add
 vscode_assistant/net.py            urllib helpers
 vscode_assistant/store.py          settings + chats on disk
-vscode_assistant/assets/           app icons, logos and the Inter font
+vscode_assistant/static/icons.js   the app's line icons
+vscode_assistant/assets/           app icon, logos, illustrations and the Inter font
 ```

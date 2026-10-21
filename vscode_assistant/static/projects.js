@@ -50,7 +50,8 @@ window.VAProjects = function (app) {
         title: verb + " " + pv.path + "?",
         body: '<p class="dim small">The AI wants to ' + (pv.action === "create" ? "create this file" : pv.action === "delete" ?
           "delete this file" : "make this change") + ' <span class="diffstat"><b class="plus">+' + pv.added + '</b> <b class="minus">−' +
-          pv.removed + "</b></span></p>" + renderDiff(pv.diff),
+          pv.removed + "</b></span></p>" + (pv.standards && pv.standards.length ? '<p class="std-ok small">' + icon("check") + "Follows the documentation standard " +
+          pv.standards.map(s => "<b>" + esc(s.name.replace(/\.md$/, "")) + "</b>").join(", ") + "</p>" : "") + renderDiff(pv.diff),
         ok: pv.action === "delete" ? "Delete file" : "Apply change", allowAll: "Allow all edits in this chat", note: true, wide: true,
       };
     }
@@ -222,7 +223,7 @@ window.VAProjects = function (app) {
     const sync = g.upstream ? '<span class="ab" title="Commits to push ↑ and to pull ↓ (as of the last fetch)">↑' + g.ahead + " ↓" + g.behind + "</span>"
       : '<span class="faint small">not on the remote yet</span>';
     let h = '<button class="btn small branch" data-g="branch" title="Switch or create a branch"><svg viewBox="0 0 16 16"><path d="M5 2.5v11M5 10.5c0-3 6-2 6-5.5M11 2.5v3"/><circle cx="5" cy="2.5" r="1.3"/><circle cx="5" cy="13.5" r="1.3"/><circle cx="11" cy="4" r="1.3"/></svg>' +
-      esc(g.branch || "?") + " ▾</button>" + sync +
+      esc(g.branch || "?") + icon("chevron-down") + "</button>" + sync +
       '<span class="gb-acts"><button class="btn small" data-g="fetch" title="Check the remote for new commits">Fetch</button>' +
       '<button class="btn small" data-g="pull" title="Get new commits (fast-forward only)">Pull' + (g.behind ? " ↓" + g.behind : "") + "</button>" +
       '<button class="btn small' + (g.ahead || (!g.upstream && (g.remotes || []).length) ? " primary" : "") + '" data-g="push" title="Send your commits (never forced)">Push' +
@@ -282,7 +283,7 @@ window.VAProjects = function (app) {
   function branchMenu() {
     const g = P.status || {};
     const d = openModal("<h3>Branches</h3><div class=\"opts branches\">" + (g.branches || []).map(b =>
-      '<button class="btn block-l' + (b === g.branch ? " on" : "") + '" data-b="' + esc(b) + '">' + (b === g.branch ? "● " : "") + esc(b) + "</button>").join("") +
+      '<button class="btn block-l' + (b === g.branch ? " on" : "") + '" data-b="' + esc(b) + '">' + (b === g.branch ? icon("check") : "") + esc(b) + "</button>").join("") +
       '</div><label>New branch from here<span class="row tight"><input id="newBranch" placeholder="e.g. fix-login-bug" spellcheck="false">' +
       '<button class="btn primary" data-a="create">Create</button></span></label><div class="row end"><button class="btn" data-a="cancel">Close</button></div>');
     d.querySelector('[data-a="cancel"]').onclick = closeModal;
@@ -334,7 +335,7 @@ window.VAProjects = function (app) {
         const full = prefix ? prefix + "/" + d : d;
         const open = P.openDirs.has(full);
         out.push('<div class="td' + (changedDirs.has(full) ? " changed" : "") + '" data-dir="' + esc(full) + '" style="padding-left:' + (8 + depth * 14) +
-          'px"><i>' + (open ? "▾" : "▸") + "</i>" + esc(d) + "</div>");
+          'px">' + icon(open ? "chevron-down" : "chevron-right", "tw") + esc(d) + "</div>");
         if (open) walk(n.dirs[d], full, depth + 1);
       });
       n.files.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })).forEach(p => out.push(fileRow(p, p.split("/").pop(), depth)));
@@ -364,7 +365,7 @@ window.VAProjects = function (app) {
     $("#edPath").textContent = P.detail ? P.detail.label : diffing ? P.diffPath + " (changes)" : f ? f.path : "No file open";
     $("#edSave").hidden = $("#edDelete").hidden = $("#edAsk").hidden = !f || diffing || f.text == null;
     $("#edDiff").hidden = !f || diffing || !statusMap()[f.path];
-    $("#edState").textContent = f && !diffing ? (f.text == null ? f.reason || "" : f.dirty ? "● unsaved" : "") : "";
+    $("#edState").textContent = f && !diffing ? (f.text == null ? f.reason || "" : f.dirty ? "Unsaved changes" : "") : "";
     if (diffing && f) $("#edDiff").hidden = true;
     if (!f || diffing) return;
     if (f.text == null) { $("#edEmpty").hidden = false; $("#edEmpty").textContent = f.reason || "Can't open this file."; return; }
@@ -434,7 +435,7 @@ window.VAProjects = function (app) {
       '<input type="checkbox" data-pick="' + esc(f.path) + '"' + (P.unchecked.has(f.path) ? "" : " checked") + ' title="Include in the commit">' +
       '<span class="nm">' + esc(f.path.split("/").pop()) + ' <span class="faint">' + esc(f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "") + "</span></span>" +
       '<b class="st ' + (CODE_CLASS[f.code] || "mod") + '" title="' + esc(f.status) + '">' + (f.code === "?" ? "U" : esc(f.code)) + "</b>" +
-      '<button class="icon-btn" data-discard="' + esc(f.path) + '" title="Discard changes">↺</button></div>').join("")
+      '<button class="icon-btn" data-discard="' + esc(f.path) + '" title="Discard changes">' + icon("undo") + "</button></div>").join("")
       : '<p class="faint small">No changes. Edit files here or ask the AI, and they show up here to commit.</p>';
   }
   function picked() {
@@ -451,7 +452,7 @@ window.VAProjects = function (app) {
   }
   async function commit() {
     const msg = $("#commitMsg").value.trim();
-    if (!msg) { toast("Write a commit message (or press ✨ Write message).", true); $("#commitMsg").focus(); return; }
+    if (!msg) { toast("Write a commit message (or press Write message).", true); $("#commitMsg").focus(); return; }
     const all = (P.status.files || []).length, n = (P.status.files || []).filter(f => !P.unchecked.has(f.path)).length;
     if (!n) { toast("Tick at least one file to commit.", true); return; }
     await gitOp("commit", { message: msg, paths: n === all ? [] : picked() });
@@ -471,7 +472,7 @@ window.VAProjects = function (app) {
       $("#commitMsg").value = r.message;
     } finally {
       b.disabled = false;
-      b.textContent = "✨ Write message";
+      b.innerHTML = icon("spark") + "Write message";
     }
   }
   async function discard(path) {
@@ -507,7 +508,7 @@ window.VAProjects = function (app) {
     const s = (Date.now() / 1000) - t;
     return s < 60 ? "just now" : s < 3600 ? Math.floor(s / 60) + "m ago" : s < 86400 ? Math.floor(s / 3600) + "h ago" : Math.floor(s / 86400) + "d ago";
   }
-  const STATUS_ICON = { todo: "○", passed: "✓", done: "✓", failed: "✗", dismissed: "–" };
+  const STATUS_ICON = { todo: "circle", passed: "check", done: "check", failed: "cross", dismissed: "close" };
   async function loadTests() {
     const id = P.cur;
     if (!id) return;
@@ -526,7 +527,7 @@ window.VAProjects = function (app) {
     const last = t.runs[0];
     const open = t.suggested.filter(s => s.status === "todo" || s.status === "failed");
     const badge = $("#testBadge");
-    badge.textContent = last && !last.ok ? "✗" : open.length ? open.length : "";
+    badge.innerHTML = last && !last.ok ? icon("cross") : open.length ? open.length : "";
     badge.className = last && !last.ok ? "bad" : "";
     const inp = $("#testCmd");
     if (document.activeElement !== inp) inp.value = t.test_command || t.guess || "";
@@ -535,33 +536,33 @@ window.VAProjects = function (app) {
     const hidden = t.suggested.length - shown.length;
     let h = '<div class="t-sec"><span>Suggested <b>' + open.length + " open</b></span><span>" +
       '<button class="icon-btn" data-t="add" title="Add a test yourself">+</button>' +
-      '<button class="btn small" data-t="suggest" title="Ask the AI which tests are missing">✨ Suggest</button></span></div>';
+      '<button class="btn small" data-t="suggest" title="Ask the AI which tests are missing">' + icon("spark") + "Suggest</button></span></div>";
     h += shown.length ? shown.map(s => '<div class="ts ' + esc(s.status) + '" data-sug="' + esc(s.id) + '">' +
-      '<i class="ti">' + (STATUS_ICON[s.status] || "○") + '</i><div class="tt"><div class="ttl">' + esc(s.title) + "</div>" +
+      '<span class="ti">' + icon(STATUS_ICON[s.status] || "circle") + '</span><div class="tt"><div class="ttl">' + esc(s.title) + "</div>" +
       (s.why ? '<div class="faint tiny">' + esc(s.why) + "</div>" : "") +
-      '<div class="tacts">' + (s.command ? '<button class="btn small" data-t="srun" title="' + esc(s.command) + '">▶ Run</button>' : "") +
+      '<div class="tacts">' + (s.command ? '<button class="btn small" data-t="srun" title="' + esc(s.command) + '">' + icon("play") + "Run</button>" : "") +
       '<button class="btn small" data-t="write" title="Ask the AI to write this test">Write with AI</button>' +
       (s.status === "dismissed" ? '<button class="btn small" data-t="reopen">Reopen</button>' :
-        (s.status !== "passed" && s.status !== "done" ? '<button class="icon-btn" data-t="done" title="Mark done">✓</button>' : "") +
-        '<button class="icon-btn" data-t="dismiss" title="Dismiss">✕</button>') + "</div></div></div>").join("")
-      : '<p class="faint small">No suggestions yet. Press ✨ Suggest, or ask the AI in a project chat what to test.</p>';
+        (s.status !== "passed" && s.status !== "done" ? '<button class="icon-btn" data-t="done" title="Mark done">' + icon("check") + "</button>" : "") +
+        '<button class="icon-btn" data-t="dismiss" title="Dismiss">' + icon("close") + "</button>") + "</div></div></div>").join("")
+      : '<p class="faint small">No suggestions yet. Press Suggest, or ask the AI in a project chat what to test.</p>';
     if (hidden) h += '<button class="linkish" data-t="showdis">Show ' + hidden + " dismissed</button>";
-    h += '<div class="t-sec"><span>Runs <b>' + t.runs.length + "</b></span>" + (t.runs.length ? '<button class="icon-btn" data-t="clear" title="Clear the run history">⌫</button>' : "") + "</div>";
+    h += '<div class="t-sec"><span>Runs <b>' + t.runs.length + "</b></span>" + (t.runs.length ? '<button class="icon-btn" data-t="clear" title="Clear the run history">' + icon("clear") + "</button>" : "") + "</div>";
     h += t.runs.length ? t.runs.map(r => '<div class="tr' + (r.ok ? " ok" : r.code === null ? " stop" : " bad") + (P.detail && P.detail.run === r.id ? " active" : "") +
-      '" data-run="' + esc(r.id) + '"><i class="ti">' + (r.ok ? "✓" : r.code === null ? "■" : "✗") + '</i><div class="tt"><div class="ttl">' + esc(r.summary) + "</div>" +
+      '" data-run="' + esc(r.id) + '"><span class="ti">' + icon(r.ok ? "check" : r.code === null ? "stop" : "cross") + '</span><div class="tt"><div class="ttl">' + esc(r.summary) + "</div>" +
       '<div class="faint tiny"><code>' + esc(r.command) + "</code> · " + (r.by === "ai" ? "AI" : "you") + " · " + ago(r.when) + "</div></div></div>").join("")
-      : '<p class="faint small">No test runs yet. Press ▶ Run, run tests in the Terminal, or let the AI run them; they all show up here.</p>';
+      : '<p class="faint small">No test runs yet. Press Run, run tests in the Terminal, or let the AI run them; they all show up here.</p>';
     $("#tests").innerHTML = h;
   }
   function showRun(r, quiet) {
     P.diffPath = null;
     P.detail = { label: "Test run · " + r.summary, run: r.id };
-    $("#diffView").innerHTML = '<div class="run-detail"><div class="rd-head ' + (r.ok ? "ok" : "bad") + '"><b>' + (r.ok ? "✓ Passed" : r.code === null ? "■ Stopped" : "✗ Failed") +
+    $("#diffView").innerHTML = '<div class="run-detail"><div class="rd-head ' + (r.ok ? "ok" : "bad") + '"><b>' + (r.ok ? icon("check") + "Passed" : r.code === null ? icon("stop") + "Stopped" : icon("cross") + "Failed") +
       "</b> · " + esc(r.summary) + '</div><p class="faint small"><code>' + esc(r.command) + "</code> · run by " + (r.by === "ai" ? "the AI" : "you") + " · " +
       esc(new Date(r.when * 1000).toLocaleString()) + (r.seconds ? " · " + r.seconds + "s" : "") + " · exit code " + (r.code === null ? "none" : r.code) + "</p>" +
       (r.failures && r.failures.length ? '<h4>Failing</h4><ul class="fails">' + r.failures.map(f => "<li><code>" + esc(f) + "</code></li>").join("") + "</ul>" +
         '<button class="btn small primary" data-t="fix">Ask the AI to fix these</button>' : (!r.ok ? '<button class="btn small primary" data-t="fix">Ask the AI to fix this</button>' : "")) +
-      " <button class=\"btn small\" data-t=\"rerun\">▶ Run again</button><h4>Output</h4><pre class=\"term-out\">" + esc(r.output || "(no output)") + "</pre></div>";
+      " <button class=\"btn small\" data-t=\"rerun\">" + icon("play") + "Run again</button><h4>Output</h4><pre class=\"term-out\">" + esc(r.output || "(no output)") + "</pre></div>";
     if (!quiet) renderTests();
     renderEditor();
   }
@@ -597,7 +598,7 @@ window.VAProjects = function (app) {
       try {
         const r = await api("POST", "projects/" + P.cur + "/tests", { action: "suggest", model: app.currentModel() });
         toast(r.added.length ? "Added " + r.added.length + " suggested test" + (r.added.length === 1 ? "" : "s") : "No new suggestions.");
-      } finally { b.disabled = false; b.textContent = "✨ Suggest"; }
+      } finally { b.disabled = false; b.innerHTML = icon("spark") + "Suggest"; }
     } else if (act === "srun") await runTests(s.command, s.id);
     else if (act === "write") {
       await chatAbout("Write this test" + (s.file ? " in `" + s.file + "`" : "") + ": " + s.title + (s.why ? " (" + s.why + ")" : "") +
@@ -695,7 +696,7 @@ window.VAProjects = function (app) {
         msg(r.is_repo ? "This folder is a Git repository." : "", false);
         $("#fsList").innerHTML = (r.parent ? '<div class="fd up" data-p="' + esc(r.parent) + '">↑ ..</div>' : "") +
           (r.drives || []).map(dv => '<div class="fd drive" data-p="' + esc(dv) + '">' + esc(dv) + "</div>").join("") +
-          r.dirs.map(n => '<div class="fd" data-p="' + esc(r.path.replace(/[\\/]$/, "") + (r.path.includes("\\") ? "\\" : "/") + n) + '">📁 ' + esc(n) + "</div>").join("");
+          r.dirs.map(n => '<div class="fd" data-p="' + esc(r.path.replace(/[\\/]$/, "") + (r.path.includes("\\") ? "\\" : "/") + n) + '">' + icon("folder") + esc(n) + "</div>").join("");
         $("#fsList").querySelectorAll("[data-p]").forEach(el => (el.onclick = () => browse(el.dataset.p)));
       });
       browse(store("va-last-folder") || "");
@@ -826,7 +827,7 @@ window.VAProjects = function (app) {
     code.oninput = () => {
       if (!P.file) return;
       const dirty = code.value !== P.file.text;
-      if (dirty !== P.file.dirty) { P.file.dirty = dirty; $("#edState").textContent = dirty ? "● unsaved" : ""; }
+      if (dirty !== P.file.dirty) { P.file.dirty = dirty; $("#edState").textContent = dirty ? "Unsaved changes" : ""; }
       gutter();
     };
     code.onscroll = () => ($("#gutter").scrollTop = code.scrollTop);
@@ -890,7 +891,7 @@ window.VAProjects = function (app) {
     });
     $("#termStop").onclick = guard(async () => { await api("POST", "projects/" + P.cur + "/terminal", { stop: true }); });
     $("#termClear").onclick = () => { P.term[P.cur] = ""; renderTerm(); };
-    $("#termToggle").onclick = () => { $("#term").classList.toggle("collapsed"); $("#termToggle").textContent = $("#term").classList.contains("collapsed") ? "▴" : "▾"; };
+    $("#termToggle").onclick = () => { $("#term").classList.toggle("collapsed"); $("#termToggle").innerHTML = icon($("#term").classList.contains("collapsed") ? "chevron-up" : "chevron-down"); };
     $("#termCmd").onkeydown = e => {
       if (e.key === "Enter") { e.preventDefault(); guard(termRun)(); }
       else if (e.key === "ArrowUp" || e.key === "ArrowDown") {

@@ -30,6 +30,7 @@ from . import agent_browser, engine, gitops, net, projects, providers, web
 from .library import KINDS, Library
 from .store import Store, new_id
 
+mimetypes.add_type("image/webp", ".webp")   # older Pythons don't know it
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 APP_NAME = "VSCode Assistant"
@@ -46,6 +47,7 @@ class Hub:
         self.library = Library(self.store.dir)
         self.projects = projects.Projects(self.store)
         self.projects.tests.publish = self.publish
+        self.projects.library = self.library
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
         self.clients = []           # one queue per open event stream
@@ -947,13 +949,21 @@ class Handler(BaseHTTPRequestHandler):
                 with open(p, "wb") as f:
                     f.write(base64.b64decode(b.get("data") or ""))
                 stored = lib.import_file(kind, p)
+                if kind == "standards":   # an uploaded standard is in force straight away
+                    lib.set_meta(stored, {"use_for": os.path.splitext(stored)[0], "files": "", "active": True})
             finally:
                 shutil.rmtree(tmpdir, ignore_errors=True)
             return self.ok({"name": stored, "names": lib.names(kind)})
         if method == "GET":
             if name:
-                return self.ok({"name": name, "text": lib.read(kind, name)})
-            return self.ok({"names": lib.names(kind), "folder": lib.dir(kind)})
+                out = {"name": name, "text": lib.read(kind, name)}
+                if kind == "standards":
+                    out["meta"] = lib.meta(name)
+                return self.ok(out)
+            out = {"names": lib.names(kind), "folder": lib.dir(kind)}
+            if kind == "standards":
+                out["metas"] = {n: lib.meta(n) for n in out["names"]}
+            return self.ok(out)
         if method == "PUT":
             b = self.body()
             old, new = b.get("old") or "", b.get("name") or ""
@@ -961,6 +971,8 @@ class Handler(BaseHTTPRequestHandler):
                 new = lib.rename(kind, old, new)
                 self.rename_in_chats(kind, old, new)
             stored = lib.save(kind, new, b.get("text") or "")
+            if kind == "standards":
+                lib.set_meta(stored, b.get("meta") if isinstance(b.get("meta"), dict) else lib.meta(stored))
             return self.ok({"name": stored, "names": lib.names(kind)})
         if method == "DELETE" and name:
             lib.delete(kind, name)

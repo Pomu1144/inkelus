@@ -151,15 +151,15 @@
     const known = new Set(groups().map(g => g.id));
     const item = c => '<div class="chat-item' + (c.id === S.activeId ? " active" : "") + '" draggable="true" data-id="' +
       esc(c.id) + '"><span>' + esc(c.title) + "</span>" + (S.busy.has(c.id) ? '<i class="busy"></i>' : "") +
-      '<button class="x" title="Delete" data-del="' + esc(c.id) + '">✕</button></div>';
+      '<button class="x" title="Delete" data-del="' + esc(c.id) + '">' + icon("close") + "</button></div>";
     const section = (gid, name, members, collapsed, custom) => {
       if (S.searchIds && !members.length) return "";
       return '<div class="group' + (collapsed ? " collapsed" : "") + '" data-gid="' + esc(gid) + '">' +
-        '<div class="group-head" data-gid="' + esc(gid) + '"><span class="gcaret">' + (collapsed ? "▸" : "▾") + "</span>" +
+        '<div class="group-head" data-gid="' + esc(gid) + '"><span class="gcaret">' + icon(collapsed ? "chevron-right" : "chevron-down") + "</span>" +
         '<span class="gname">' + esc(name) + '</span><span class="gcount">' + members.length + "</span>" +
         '<span class="gacts"><button class="icon-btn" data-gact="new" title="New chat in ' + esc(name) + '">+</button>' +
-        (custom ? '<button class="icon-btn" data-gact="rename" title="Rename">✎</button>' +
-                  '<button class="icon-btn" data-gact="delete" title="Delete group">✕</button>' : "") + "</span></div>" +
+        (custom ? '<button class="icon-btn" data-gact="rename" title="Rename">' + icon("edit") + "</button>" +
+                  '<button class="icon-btn" data-gact="delete" title="Delete group">' + icon("close") + "</button>" : "") + "</span></div>" +
         '<div class="group-body">' + (collapsed ? "" : members.map(item).join("") ||
           '<p class="drop-hint">Drag chats here</p>') + "</div></div>";
     };
@@ -262,7 +262,55 @@
     return r.chat;
   }
 
-  async function ensureChat() { return S.chat || await newChat(); }
+  // "New chat" opens a blank draft; it's only saved as a conversation once you send something or change
+  // one of its settings, so pressing New chat again and again doesn't fill the sidebar with empty chats.
+  function startDraft(group, model) {
+    S.activeId = null;
+    S.chat = null;
+    S.draft = { group: group || "", model: model || "" };
+    $("#stats").textContent = "";
+    renderChat();
+    renderRail();
+    showView("chat");
+    $("#prompt").focus();
+  }
+
+  async function ensureChat() {
+    if (S.chat) return S.chat;
+    const d = S.draft || {};
+    S.draft = null;
+    return await newChat(d.model, d.group);
+  }
+
+  function fastDefault() { try { return localStorage.getItem("va-fast") === "1"; } catch (_) { return false; } }
+
+  // the sidebar folds down to a strip of icons (Ctrl+B)
+  function setRail(collapsed, save) {
+    $("#app").classList.toggle("rail-collapsed", collapsed);
+    $("#railToggle").title = collapsed ? "Expand the sidebar (Ctrl+B)" : "Collapse the sidebar (Ctrl+B)";
+    if (save) { try { localStorage.setItem("va-rail", collapsed ? "1" : "0"); } catch (_) { /* private window */ } }
+  }
+
+  // the + menu in the message box
+  function togglePlus(open) {
+    const m = $("#plusMenu");
+    m.hidden = open === undefined ? !m.hidden : !open;
+    $("#plusBtn").classList.toggle("on", !m.hidden);
+  }
+  async function attachDocs(files) {
+    const c = await ensureChat();
+    const added = [];
+    for (const f of files) {
+      const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = rej; r.readAsDataURL(f); });
+      try { added.push((await api("POST", "library/documents/import", { filename: f.name, data })).name); }
+      catch (e) { toast(f.name + ": " + e.message, true); }
+    }
+    if (!added.length) return;
+    S.library.documents = Array.from(new Set(S.library.documents.concat(added)));
+    await patchChat({ docs: Array.from(new Set((c.docs || []).concat(added))) });
+    renderChat();
+    toast("The AI can read " + added.join(", ") + " in this chat. It's kept in Library › Documents.");
+  }
 
   function statsText(st) {
     const p = [];
@@ -288,7 +336,7 @@
     $("#agentBtn").classList.toggle("on", ag);
     const docs = c ? (c.docs || []).filter(d => S.library.documents.includes(d)).length : 0;
     $("#libBtn").textContent = docs ? "Library · " + docs + " doc" + (docs === 1 ? "" : "s") : "Library";
-    $("#fastBtn").classList.toggle("on", !!(c && c.params && c.params.fast));
+    $("#fastBtn").classList.toggle("on", c ? !!(c.params && c.params.fast) : fastDefault());
     fillParams();
     updateSend();
     const msgs = c ? c.messages : [];
@@ -305,7 +353,7 @@
       const args = JSON.stringify(m.arguments || {});
       const st = m.status || (m.is_error ? "error" : "done");
       const res = (m.content || "").trim();
-      return '<div class="tool' + (m.is_error ? " err" : "") + '" data-i="' + i + '"><div class="t-head"><span class="name">⚙ ' +
+      return '<div class="tool' + (m.is_error ? " err" : "") + '" data-i="' + i + '"><div class="t-head"><span class="name">' + icon("tool") + " " +
         esc(m.name || "tool") + '</span><span class="args">' + esc(args) + '</span><span class="st' +
         (st === "error" || st === "denied" ? " bad" : "") + '">' + (st === "running" ? '<i class="spin"></i>' : "") +
         esc(st) + "</span></div>" +
@@ -363,7 +411,7 @@
       h += '<details class="think"' + (showOpen ? " open" : "") + "><summary>Reasoning</summary><div>" + esc(think) + "</div></details>";
     }
     h += MD.render(text);
-    if (live && text.trim()) h += '<span class="caret">▌</span>';
+    if (live && text.trim()) h += '<span class="caret"></span>';
     return h;
   }
 
@@ -513,7 +561,7 @@
   function renderAttachments() {
     $("#attachments").innerHTML = S.images.map((im, i) =>
       '<span class="att"><img src="data:image/png;base64,' + esc(im.data) + '" alt="">' + esc(im.name) +
-      '<button type="button" data-rm="' + i + '">✕</button></span>').join("");
+      '<button type="button" data-rm="' + i + '">' + icon("close") + "</button></span>").join("");
   }
   function autosize() {
     const t = $("#prompt");
@@ -665,6 +713,7 @@
     const st = await api("GET", "state");
     S.library = st.library;
     const docs = S.library.documents, temps = S.library.templates;
+    try { const sr = await api("GET", "library/standards"); S.stdCount = sr.names.filter(n => sr.metas[n] && sr.metas[n].active).length; } catch (_) { S.stdCount = 0; }
     const cur = c.template === undefined ? "auto" : c.template;
     const tsel = ["auto", ""].concat(temps).includes(cur) ? cur : "auto";
     const d = openModal('<h3>Documents</h3><p class="faint small">The AI reads the documents you tick, in this chat only.</p><div class="opts">' +
@@ -674,7 +723,8 @@
       '</div><h3>Template</h3><p class="faint small">Auto lets the AI see every template and use the one that fits the request.</p><div class="opts">' +
       [["auto", "Auto: pick the matching template"], ["", "None"]].concat(temps.map(t => [t, t])).map(([v, l]) =>
         '<label class="check"><input type="radio" name="tpl" value="' + esc(v) + '"' + (v === tsel ? " checked" : "") + "> " + esc(l) + "</label>").join("") +
-      '</div><div class="row between"><button class="btn" data-a="lib">Open Library</button><span><button class="btn" data-a="cancel">Cancel</button> ' +
+      '</div>' + (S.stdCount ? '<p class="faint small">' + S.stdCount + " documentation standard" + (S.stdCount === 1 ? " applies" : "s apply") +
+        " in every chat (Library › Doc standards).</p>" : "") + '<div class="row between"><button class="btn" data-a="lib">Open Library</button><span><button class="btn" data-a="cancel">Cancel</button> ' +
       '<button class="btn primary" data-a="done">Done</button></span></div>');
     d.querySelector('[data-a="cancel"]').onclick = closeModal;
     d.querySelector('[data-a="lib"]').onclick = () => { closeModal(); showView("library"); };
@@ -732,7 +782,7 @@
         '<button class="btn small" data-m="unload" data-n="' + esc(m.name) + '">Unload</button></td></tr>').join("")
         : '<tr class="none"><td colspan="6">No models loaded.</td></tr>';
       libBody.innerHTML = r.models.length ? r.models.map(m => "<tr><td>" + esc(m.name) +
-        (loaded.has(m.name) ? '<span class="tag">● loaded</span>' : "") + "</td><td>" + esc(m.params || "") + "</td><td>" +
+        (loaded.has(m.name) ? '<span class="tag">' + icon("dot") + "loaded</span>" : "") + "</td><td>" + esc(m.params || "") + "</td><td>" +
         esc(m.quant || "") + "</td><td>" + esc(m.family || m.owner || "") + "</td><td>" + esc(fmtBytes(m.size)) + "</td><td>" +
         esc(ago(m.modified)) + '</td><td class="acts"><button class="btn small primary" data-m="chat" data-n="' + esc(m.name) + '">Chat</button>' +
         (r.caps.load ? '<button class="btn small" data-m="load" data-n="' + esc(m.name) + '">Load</button>' : "") +
@@ -751,7 +801,7 @@
     if (act === "chat") {
       await api("PATCH", "settings", { last_model: id });
       S.settings.last_model = id;
-      await newChat(id);
+      startDraft("", id);
       return;
     }
     if (act === "delete" && !confirm("Delete " + name + " from " + conn.name + "? This removes it from disk.")) return;
@@ -803,6 +853,12 @@
   const LIB_HINTS = {
     documents: "Reference material the AI can read: notes, specs, policies, code. Choose which documents a chat uses with the Library button in the chat header.",
     templates: "Examples of how answers should look. Use headings, tables and {{placeholders}}; the AI copies the layout and fills in the blanks. In Auto mode (the default) it sees every template and picks the one that fits the request.",
+    standards: "Documentation standards the AI must follow whenever it writes documentation, in every chat: same sections, headings and order. Upload your company's templates (Markdown, text or Word) with Import. In a project, a doc file that matches the file patterns is checked: if the AI leaves out a required section, the change is refused and it has to fix it.",
+  };
+  const LIB_EMPTY = {
+    documents: ["art_library", "No documents yet. Add reference material with New or Import, or upload one from the + menu in a chat."],
+    templates: ["art_library", "No templates yet. Add an example answer layout with New or Import."],
+    standards: ["art_standards", "No documentation standards yet. Import your team's README, API or runbook templates (Markdown, text or Word), or write one with New."],
   };
 
   async function loadLibrary(select) {
@@ -812,17 +868,32 @@
     const r = await api("GET", "library/" + kind);
     S.library[kind] = r.names;
     $("#libFolder").textContent = "Stored in " + r.folder;
-    const label = kind === "documents" ? "document" : "template";
+    const label = { documents: "document", templates: "template", standards: "standard" }[kind];
     $("#libCount").textContent = r.names.length + " " + label + (r.names.length === 1 ? "" : "s");
+    S.libMetas = r.metas || {};
     let name = select || S.libCurrent;
     if (!r.names.includes(name)) name = r.names[0] || null;
-    $("#libItems").innerHTML = r.names.map(n => '<li data-name="' + esc(n) + '"' + (n === name ? ' class="active"' : "") + ">" + esc(n) + "</li>").join("");
+    $("#libItems").innerHTML = r.names.map(n => {
+      const off = kind === "standards" && S.libMetas[n] && !S.libMetas[n].active;
+      return '<li data-name="' + esc(n) + '" class="' + (n === name ? "active" : "") + (off ? " off" : "") + '"' + (off ? ' title="Off: the AI doesn\'t have to follow it"' : "") +
+        ">" + esc(n) + (off ? ' <span class="faint">(off)</span>' : "") + "</li>";
+    }).join("");
+    const empty = !r.names.length;
+    $("#libEmpty").hidden = !empty;
+    $$("#view-library .lib-edit > label, #libText, #view-library .lib-edit > .row").forEach(el => (el.hidden = empty));
+    if (empty) { $("#libArt").src = "/assets/" + LIB_EMPTY[kind][0] + ".webp"; $("#libEmptyText").textContent = LIB_EMPTY[kind][1]; }
     await libOpen(name);
   }
   async function libOpen(name) {
     S.libCurrent = name;
     $("#libName").value = name || "";
-    $("#libText").value = name ? (await api("GET", "library/" + S.libKind + "?name=" + encodeURIComponent(name))).text : "";
+    const got = name ? await api("GET", "library/" + S.libKind + "?name=" + encodeURIComponent(name)) : { text: "" };
+    $("#libText").value = got.text;
+    $("#stdFields").hidden = S.libKind !== "standards" || !name;
+    const m = got.meta || { active: true, use_for: "", files: "" };
+    $("#stdActive").checked = m.active;
+    $("#stdUse").value = m.use_for;
+    $("#stdFiles").value = m.files;
     S.libDirty = false;
     $("#libStatus").textContent = "";
     $$("#libItems li").forEach(li => li.classList.toggle("active", li.dataset.name === name));
@@ -836,14 +907,16 @@
   async function libSave() {
     const name = $("#libName").value.trim();
     if (!name) { $("#libStatus").textContent = "Give it a name."; return; }
-    const r = await api("PUT", "library/" + S.libKind, { old: S.libCurrent || "", name, text: $("#libText").value });
+    const body = { old: S.libCurrent || "", name, text: $("#libText").value };
+    if (S.libKind === "standards") body.meta = { active: $("#stdActive").checked, use_for: $("#stdUse").value, files: $("#stdFiles").value };
+    const r = await api("PUT", "library/" + S.libKind, body);
     S.libDirty = false;
     await loadLibrary(r.name);
     $("#libStatus").textContent = "Saved";
   }
   async function libNew() {
     if (!libConfirmLeave()) return;
-    const base = S.libKind === "documents" ? "New document" : "New template";
+    const base = { documents: "New document", templates: "New template", standards: "New standard" }[S.libKind];
     const have = new Set(S.library[S.libKind]);
     let name = base + ".md", n = 2;
     while (have.has(name)) name = base + " " + n++ + ".md";
@@ -925,7 +998,27 @@
   // ── Wiring ───────────────────────────────────────────────────────────
   function wire() {
     $$(".nav a").forEach(a => (a.onclick = () => showView(a.dataset.view)));
-    $("#newChat").onclick = guard(() => newChat());
+    $("#newChat").onclick = () => startDraft();
+    $("#railToggle").onclick = () => setRail(!$("#app").classList.contains("rail-collapsed"), true);
+    document.addEventListener("keydown", e => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setRail(!$("#app").classList.contains("rail-collapsed"), true);
+      }
+    });
+    $("#plusBtn").onclick = e => { e.stopPropagation(); togglePlus(); };
+    document.addEventListener("click", e => { if (!$("#plusMenu").hidden && !e.target.closest(".plus-wrap")) togglePlus(false); });
+    $("#plusMenu").onclick = guard(async e => {
+      const b = e.target.closest("[data-plus]");
+      if (!b) return;
+      togglePlus(false);
+      const k = b.dataset.plus;
+      if (k === "image") $("#attach").click();
+      else if (k === "doc") $("#attachDoc").click();
+      else if (k === "library") await libraryDialog();
+      else if (k === "project") await Projects.pickForChat();
+    });
+    $("#attachDoc").onchange = e => { const f = Array.from(e.target.files); e.target.value = ""; guard(attachDocs)(f); };
     $("#chatList").onclick = guard(async e => {
       const del = e.target.closest("[data-del]");
       if (del) {
@@ -942,7 +1035,7 @@
         e.stopPropagation();
         const gid = gact.closest(".group-head").dataset.gid;
         const g = groups().find(x => x.id === gid);
-        if (gact.dataset.gact === "new") await newChat(null, gid);
+        if (gact.dataset.gact === "new") startDraft(gid);
         else if (gact.dataset.gact === "rename") renameGroup(gid);
         else if (gact.dataset.gact === "delete" && g &&
                  confirm('Delete the group "' + g.name + '"? Its chats move to General.')) {
@@ -1083,6 +1176,7 @@
     comp.ondrop = e => { e.preventDefault(); comp.classList.remove("drag"); addImageFiles(e.dataTransfer.files); };
     document.addEventListener("keydown", e => {
       if (e.key === "Escape") {
+        if (!$("#plusMenu").hidden) { togglePlus(false); return; }
         if (!$("#modal").hidden && !$("#dialog").dataset.confirm) { closeModal(); return; }
         if (S.chat && S.busy.has(S.chat.id)) api("POST", "chats/" + S.chat.id + "/stop", {});
       }
@@ -1109,7 +1203,8 @@
       const li = e.target.closest("li");
       if (li && li.dataset.name !== S.libCurrent && libConfirmLeave()) await libOpen(li.dataset.name);
     });
-    $("#libName").oninput = $("#libText").oninput = () => { S.libDirty = true; $("#libStatus").textContent = "Unsaved changes"; };
+    $("#libName").oninput = $("#libText").oninput = $("#stdUse").oninput = $("#stdFiles").oninput = $("#stdActive").onchange =
+      () => { S.libDirty = true; $("#libStatus").textContent = "Unsaved changes"; };
     $("#libText").onkeydown = e => { if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); guard(libSave)(); } };
     $("#libSave").onclick = guard(libSave);
     $("#libNew").onclick = guard(libNew);
@@ -1238,6 +1333,9 @@
 
   // ── Start ────────────────────────────────────────────────────────────
   (async function start() {
+    let railSaved = null;
+    try { railSaved = localStorage.getItem("va-rail"); } catch (_) { /* private window */ }
+    setRail(railSaved === "1" || (railSaved === null && window.innerWidth < 900), false);
     Projects = window.VAProjects({ api, toast, guard, esc, openModal, closeModal, $, $$, S, showView, patchChat,
       renderChat, renderRail, newChat, currentModel, autosize });
     wire();

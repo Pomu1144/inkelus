@@ -11,18 +11,19 @@
 <body>
 <div id="app">
   <aside class="rail">
-    <div class="brand"><img class="logo-small" src="/assets/logo_small_warm.png" alt="" width="24" height="24"><span>__APP_NAME__</span></div>
-    <button class="btn primary block new-chat" id="newChat"><i class="plus">+</i><span>New chat</span></button>
+    <div class="brand"><img class="logo-small" src="/assets/logo_small_warm.png" alt="" width="24" height="24"><span class="lbl">__APP_NAME__</span>
+      <button class="icon-btn rail-toggle" id="railToggle" title="Collapse the sidebar (Ctrl+B)"><i data-icon="sidebar"></i></button></div>
+    <button class="btn primary block new-chat" id="newChat" title="New chat"><i class="plus"><i data-icon="plus"></i></i><span class="lbl">New chat</span></button>
     <nav class="nav">
-      <a data-view="chat" class="active"><svg viewBox="0 0 16 16"><path d="M2 3h12v8H7l-4 3v-3H2z"/></svg>Chat</a>
-      <a data-view="projects"><svg viewBox="0 0 16 16"><path d="M1.5 3.5h5l1.5 1.5h6.5v8.5h-13z M5.5 8l-1.5 1.5 1.5 1.5 M10.5 8l1.5 1.5-1.5 1.5"/></svg>Projects</a>
-      <a data-view="models"><svg viewBox="0 0 16 16"><path d="M8 1.5l6 3.5v6l-6 3.5-6-3.5V5z M2 5l6 3.5L14 5 M8 8.5V14.5"/></svg>Models</a>
-      <a data-view="library"><svg viewBox="0 0 16 16"><path d="M3 1.5h8v11H3z M5 4.5h4 M5 7h4 M13 4v10.5H5"/></svg>Library</a>
-      <a data-view="passwords"><svg viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>Passwords</a>
-      <a data-view="settings"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15M3 3l1.8 1.8M11.2 11.2L13 13M3 13l1.8-1.8M11.2 4.8L13 3"/></svg>Settings</a>
+      <a data-view="chat" class="active" title="Chat"><svg viewBox="0 0 16 16"><path d="M2 3h12v8H7l-4 3v-3H2z"/></svg><span class="lbl">Chat</span></a>
+      <a data-view="projects" title="Projects"><svg viewBox="0 0 16 16"><path d="M1.5 3.5h5l1.5 1.5h6.5v8.5h-13z M5.5 8l-1.5 1.5 1.5 1.5 M10.5 8l1.5 1.5-1.5 1.5"/></svg><span class="lbl">Projects</span></a>
+      <a data-view="models" title="Models"><svg viewBox="0 0 16 16"><path d="M8 1.5l6 3.5v6l-6 3.5-6-3.5V5z M2 5l6 3.5L14 5 M8 8.5V14.5"/></svg><span class="lbl">Models</span></a>
+      <a data-view="library" title="Library"><svg viewBox="0 0 16 16"><path d="M3 1.5h8v11H3z M5 4.5h4 M5 7h4 M13 4v10.5H5"/></svg><span class="lbl">Library</span></a>
+      <a data-view="passwords" title="Passwords"><svg viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg><span class="lbl">Passwords</span></a>
+      <a data-view="settings" title="Settings"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15M3 3l1.8 1.8M11.2 11.2L13 13M3 13l1.8-1.8M11.2 4.8L13 3"/></svg><span class="lbl">Settings</span></a>
     </nav>
     <div class="chats-head"><span>Recents</span><input id="search" type="search" placeholder="Search" aria-label="Search chats">
-      <button class="icon-btn" id="newGroup" title="New group">+</button></div>
+      <button class="icon-btn" id="newGroup" title="New group (a folder for chats)"><i data-icon="folder-plus"></i></button></div>
     <div class="chat-list" id="chatList"></div>
     <div class="status"><i id="statusDot"></i><span id="statusText">Connecting…</span></div>
   </aside>
@@ -62,8 +63,15 @@
         <div class="attachments" id="attachments"></div>
         <textarea id="prompt" rows="2" placeholder="Write to the model…   (Enter to send, Shift+Enter for a new line)"></textarea>
         <div class="bar">
-          <label class="btn small attach" title="Attach images"><input type="file" id="attach" accept="image/*" multiple hidden><span class="plus-i">+</span><span class="lbl">Attach image</span></label>
-          <button class="btn small fast" type="button" id="fastBtn" title="Fast: skip the model's reasoning step for quicker answers">⚡ Fast</button>
+          <input type="file" id="attach" accept="image/*" multiple hidden><input type="file" id="attachDoc" multiple hidden>
+          <span class="plus-wrap"><button class="btn small attach" type="button" id="plusBtn" title="Add images, documents, a project…" aria-haspopup="menu"><i data-icon="plus" class="plus-i"></i><span class="lbl">Add</span></button>
+            <div class="menu" id="plusMenu" role="menu" hidden>
+              <button type="button" data-plus="image" role="menuitem"><i data-icon="image"></i><span>Upload images<small>For models that can see images</small></span></button>
+              <button type="button" data-plus="doc" role="menuitem"><i data-icon="file-plus"></i><span>Upload documents<small>Text, Markdown, code or Word; the AI reads them in this chat</small></span></button>
+              <button type="button" data-plus="library" role="menuitem"><i data-icon="book"></i><span>Library documents and templates<small>Pick what this chat uses</small></span></button>
+              <button type="button" data-plus="project" role="menuitem"><i data-icon="code"></i><span>Work on a project<small>Let the AI read and change a code project</small></span></button>
+            </div></span>
+          <button class="btn small fast" type="button" id="fastBtn" title="Fast: skip the model's reasoning step for quicker answers"><i data-icon="bolt"></i>Fast</button>
           <span class="faint small" id="stats"></span>
           <button class="btn primary send" id="sendBtn" type="submit" title="Send (Enter)"><span class="lbl">Send</span><svg class="ico-send" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/></svg><svg class="ico-stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/></svg></button>
         </div>
@@ -83,6 +91,7 @@
       </header>
       <div class="scroll" id="projEmpty" hidden>
         <div class="proj-start">
+          <img class="art" alt="" src="/assets/art_projects.webp">
           <p class="dim">Open a code project to browse and edit its files, run commands, and commit, pull and push
             with Git. Then chat about it: the AI can read the code, propose changes (you approve each one as a diff),
             run the tests and fix what fails.</p>
@@ -105,20 +114,20 @@
               <button class="tab" data-side="history">History</button>
             </div>
             <div class="side-pane" id="sideFiles">
-              <div class="row tight"><input id="fileFilter" type="search" placeholder="Find a file"><button class="icon-btn" id="newFile" title="New file">+</button><button class="icon-btn" id="refreshFiles" title="Refresh">⟳</button></div>
+              <div class="row tight"><input id="fileFilter" type="search" placeholder="Find a file"><button class="icon-btn" id="newFile" title="New file"><i data-icon="file-plus"></i></button><button class="icon-btn" id="refreshFiles" title="Refresh"><i data-icon="refresh"></i></button></div>
               <div class="tree" id="tree"></div>
             </div>
             <div class="side-pane" id="sideChanges" hidden>
               <div class="changes" id="changes"></div>
               <div class="commit-box" id="commitBox">
                 <textarea id="commitMsg" rows="3" placeholder="Commit message"></textarea>
-                <div class="row tight between"><button class="btn small" id="genMsg" title="Ask the AI to describe the changes">✨ Write message</button>
+                <div class="row tight between"><button class="btn small" id="genMsg" title="Ask the AI to describe the changes"><i data-icon="spark"></i>Write message</button>
                   <button class="btn small primary" id="commitBtn">Commit</button></div>
               </div>
             </div>
             <div class="side-pane" id="sideTests" hidden>
               <label class="tiny">Test command<span class="row tight"><input id="testCmd" spellcheck="false" placeholder="e.g. npm test">
-                <button class="btn small primary" id="testRun" title="Run the tests in the Terminal">▶ Run</button></span></label>
+                <button class="btn small primary" id="testRun" title="Run the tests in the Terminal"><i data-icon="play"></i>Run</button></span></label>
               <div class="tests" id="tests"></div>
             </div>
             <div class="side-pane" id="sideHistory" hidden><div class="history" id="history"></div></div>
@@ -134,7 +143,7 @@
             </div>
             <div class="term" id="term">
               <div class="term-head"><span class="faint small">TERMINAL</span><input id="termCmd" placeholder="Run a command in the project folder, e.g. pytest, npm test, git status" spellcheck="false">
-                <button class="btn small" id="termRun">Run</button><button class="btn small" id="termStop" hidden>Stop</button><button class="icon-btn" id="termClear" title="Clear">⌫</button><button class="icon-btn" id="termToggle" title="Hide or show">▾</button></div>
+                <button class="btn small" id="termRun">Run</button><button class="btn small" id="termStop" hidden>Stop</button><button class="icon-btn" id="termClear" title="Clear"><i data-icon="clear"></i></button><button class="icon-btn" id="termToggle" title="Hide or show"><i data-icon="chevron-down"></i></button></div>
               <pre class="term-out" id="termOut"></pre>
             </div>
           </div>
@@ -172,6 +181,7 @@
         <div class="tools tabs">
           <button class="tab active" data-kind="documents">Documents</button>
           <button class="tab" data-kind="templates">Templates</button>
+          <button class="tab" data-kind="standards">Doc standards</button>
         </div>
       </header>
       <div class="lib">
@@ -186,7 +196,15 @@
         </div>
         <div class="panel lib-edit">
           <p class="faint small" id="libHint"></p>
+          <div class="lib-empty" id="libEmpty" hidden><img class="art" alt="" id="libArt" src="/assets/art_library.webp"><p class="dim small" id="libEmptyText"></p></div>
           <label>Name<input id="libName"></label>
+          <div class="std-fields" id="stdFields" hidden>
+            <label class="check"><input type="checkbox" id="stdActive"> The AI must follow this standard</label>
+            <div class="grid2">
+              <label>Use it for (the kind of documentation)<input id="stdUse" placeholder="e.g. README files, API reference, runbooks"></label>
+              <label>Project files it applies to (checked when the AI writes them)<input id="stdFiles" spellcheck="false" placeholder="e.g. README.md, docs/**/*.md"></label>
+            </div>
+          </div>
           <textarea id="libText" spellcheck="false"></textarea>
           <div class="row between">
             <button class="btn danger" id="libDelete">Delete</button>
@@ -208,12 +226,14 @@
           <p class="faint small">Saved logins the agent browser can use on sites that need you to sign in. They're stored only on this computer, encrypted with a master password you choose (AES-256, key made with 600,000 rounds of PBKDF2), and they're encrypted and decrypted here in this page. The app never stores your master password. The AI never sees a password: when it needs to log in, you're asked each time, and the login is only filled on the site it was saved for. There's no way to recover a forgotten master password.</p>
         </div>
         <div class="panel" id="vaultCreate" hidden>
+          <img class="art small-art" alt="" src="/assets/art_passwords.webp">
           <h3>Create your password vault</h3>
           <label>Master password (at least 10 characters)<input type="password" id="vNew1" autocomplete="new-password"></label>
           <label>Type it again<input type="password" id="vNew2" autocomplete="new-password"></label>
           <div class="row"><button class="btn primary" id="vCreate">Create vault</button><span class="small" id="vCreateMsg"></span></div>
         </div>
         <div class="panel" id="vaultUnlock" hidden>
+          <img class="art small-art" alt="" src="/assets/art_passwords.webp">
           <h3>Unlock your passwords</h3>
           <label>Master password<input type="password" id="vPass" autocomplete="current-password"></label>
           <div class="row between"><button class="btn primary" id="vUnlock">Unlock</button><span class="small" id="vUnlockMsg"></span>
@@ -320,6 +340,7 @@
 
 <div class="modal" id="modal" hidden><div class="dialog" id="dialog"></div></div>
 <div class="toast" id="toast" hidden></div>
+<script src="/static/icons.js"></script>
 <script src="/static/markdown.js"></script>
 <script src="/static/vault.js"></script>
 <script src="/static/projects.js"></script>
