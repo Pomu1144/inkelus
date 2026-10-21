@@ -15,6 +15,7 @@ import json
 import mimetypes
 import os
 import queue
+import re
 import secrets
 import shutil
 import subprocess
@@ -26,7 +27,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import agent_browser, engine, gitops, net, projects, providers, web
+from . import agent_browser, api, engine, gitops, net, projects, providers, tasks, web
 from .library import KINDS, Library
 from .store import Store, new_id
 
@@ -48,6 +49,10 @@ class Hub:
         self.projects = projects.Projects(self.store)
         self.projects.tests.publish = self.publish
         self.projects.library = self.library
+        self.api = api.Store(self.store.dir)
+        self.servers = api.Servers(self.publish)
+        self.projects.api = self.api
+        self.projects.servers = self.servers
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
         self.clients = []           # one queue per open event stream
@@ -717,6 +722,8 @@ class Handler(BaseHTTPRequestHandler):
         arg = lambda k: (query.get(k) or [""])[0]
         if sub == "files" and method == "GET":
             return self.ok({"files": p.files(), "root": p.root})
+        if sub == "tasks" and method == "GET":
+            return self.ok(tasks.detect(p.root))
         if sub == "file":
             if method == "GET":
                 full = p.resolve(arg("path"), allow_root=False)
@@ -922,6 +929,185 @@ class Handler(BaseHTTPRequestHandler):
         text = text.split("</think>")[-1].strip().strip("`").strip()
         return text
 
+    def api_http(self, method, parts, query):
+        """The API tab: requests, collections, environments, history, endpoints and the dev server."""
+        h = self.hub
+        A = h.api
+        sub = parts[0] if parts else ""
+        arg = lambda k: (query.get(k) or [""])[0]
+        b = self.body() if method in ("POST", "PUT", "PATCH") else {}
+        pid = b.get("project", arg("project")) or ""
+        proj = h.projects.get(pid) if pid else None
+        if pid and not proj:
+            return self.fail(404, "That project was removed.")
+
+        def env_vals():
+            env = next((e for e in A.data["environments"] if e["id"] == b.get("env")), None) if b.get("env") else A.env(pid)
+            vals, secrets = api.variables(env)
+            if proj is not None and "baseUrl" not in vals:
+                vals["baseUrl"] = proj.server_config()["url"].rstrip("/")
+            return vals, secrets
+
+        if sub == "state" and method == "GET":
+            out = A.scope(pid)
+            if proj is not None:
+                out["server"] = dict(h.servers.status(pid), config=proj.server_config(), saved=proj.data.get("dev_server") or {})
+                out["tasks"] = tasks.detect(proj.root)
+            return self.ok(out)
+        if sub == "send" and method == "POST":
+            req = b.get("request") or {}
+            vals, secrets = env_vals()
+            res = api.send(req, vals, timeout=max(1, min(int(b.get("timeout") or 30), 300)),
+                           follow=b.get("follow", True) is not False, verify=b.get("verify", True) is not False)
+            res["checks"] = api.run_checks(req.get("checks") or [], res)
+            res["sent_headers"] = [[k, v] for k, v in res.get("sent_headers") or []]
+            A.add_history(pid, req, res, "you")
+            return self.ok(res)
+        if sub == "curl" and method == "POST":
+            vals, secrets = env_vals()
+            return self.ok({"curl": api.to_curl(b.get("request") or {}, vals)})
+        if sub == "collections":
+            cid = parts[1] if len(parts) > 1 else ""
+            if method == "POST" and not cid:
+                col = {"id": api.new_id(), "name": str(b.get("name") or "New collection")[:100], "project": pid,
+                       "requests": b.get("requests") if isinstance(b.get("requests"), list) else []}
+                with A.lock:
+                    A.data["collections"].append(col)
+                    A.save()
+                return self.ok({"collection": col})
+            col = A.collection(cid)
+            if not col:
+                return self.fail(404, "That collection is gone.")
+            if method == "PUT":
+                with A.lock:
+                    if "name" in b:
+                        col["name"] = str(b["name"])[:100] or col["name"]
+                    if isinstance(b.get("requests"), list):
+                        col["requests"] = b["requests"]
+                    A.save()
+                return self.ok({"collection": col})
+            if method == "DELETE":
+                with A.lock:
+                    A.data["collections"] = [c for c in A.data["collections"] if c["id"] != cid]
+                    A.save()
+                return self.ok()
+            if method == "GET" and len(parts) > 2 and parts[2] == "export":
+                safe = "".join(ch for ch in col["name"] if ch.isalnum() or ch in " -_").strip() or "collection"
+                return self.send(200, json.dumps(api.to_postman(col), indent=2, ensure_ascii=False), "application/json; charset=utf-8",
+                                 {"Content-Disposition": "attachment; filename*=UTF-8''" + quote(safe + ".postman_collection.json")})
+            if method == "POST" and len(parts) > 2 and parts[2] == "run":
+                vals, secrets = env_vals()
+                t0 = time.time()
+                results, text = api.run_collection(col, vals, secrets)
+                if pid:
+                    failed = sum(1 for r in results if not r["pass"])
+                    h.projects.tests.add_run(pid, "API: " + col["name"], 1 if failed else 0, text, "you", time.time() - t0)
+                return self.ok({"results": results, "summary": text.splitlines()[-1] if text else ""})
+        if sub == "import" and method == "POST":
+            text = (b.get("text") or "").strip()
+            target = A.collection(b.get("collection") or "")
+            if text.startswith("curl") or text.startswith("curl.exe"):
+                r = api.from_curl(text)
+                with A.lock:
+                    if not target:
+                        target = {"id": api.new_id(), "name": "Imported", "project": pid, "requests": []}
+                        A.data["collections"].append(target)
+                    target["requests"].append(r)
+                    A.save()
+                return self.ok({"collection": target, "request": r})
+            try:
+                doc = json.loads(text)
+            except ValueError:
+                return self.fail(400, "Paste a curl command or a Postman collection (JSON).")
+            col, env = api.from_postman(doc)
+            col["project"] = pid
+            with A.lock:
+                A.data["collections"].append(col)
+                if env:
+                    env["project"] = pid
+                    A.data["environments"].append(env)
+                A.save()
+            return self.ok({"collection": col, "environment": env})
+        if sub == "environments":
+            eid = parts[1] if len(parts) > 1 else ""
+            with A.lock:
+                if method == "POST" and not eid:
+                    env = {"id": api.new_id(), "name": str(b.get("name") or "New environment")[:100], "project": pid,
+                           "vars": b.get("vars") if isinstance(b.get("vars"), list) else
+                           [{"key": "baseUrl", "value": proj.server_config()["url"] if proj else "http://localhost:3000",
+                             "secret": False, "enabled": True}]}
+                    A.data["environments"].append(env)
+                    A.data["active_env"][pid] = env["id"]
+                    A.save()
+                    return self.ok({"environment": env})
+                env = next((e for e in A.data["environments"] if e["id"] == eid), None)
+                if not env:
+                    return self.fail(404, "That environment is gone.")
+                if method == "PUT":
+                    if "name" in b:
+                        env["name"] = str(b["name"])[:100] or env["name"]
+                    if isinstance(b.get("vars"), list):
+                        env["vars"] = [{"key": str(v.get("key") or "").strip()[:100], "value": str(v.get("value") or ""),
+                                        "secret": bool(v.get("secret")), "enabled": v.get("enabled", True) is not False}
+                                       for v in b["vars"] if isinstance(v, dict) and str(v.get("key") or "").strip()]
+                    A.save()
+                    return self.ok({"environment": env})
+                if method == "DELETE":
+                    A.data["environments"] = [e for e in A.data["environments"] if e["id"] != eid]
+                    A.save()
+                    return self.ok()
+        if sub == "active_env" and method == "POST":
+            with A.lock:
+                A.data["active_env"][pid] = b.get("env") or ""
+                A.save()
+            return self.ok()
+        if sub == "history" and method == "DELETE":
+            with A.lock:
+                A.data["history"] = [x for x in A.data["history"] if x.get("project", "") != pid]
+                A.save()
+            return self.ok()
+        if proj is None and sub in ("endpoints", "compare", "server", "docs"):
+            return self.fail(400, "Pick a project first.")
+        if sub == "endpoints" and method == "GET":
+            return self.ok({"routes": api.find_routes(proj)})
+        if sub == "docs" and method == "GET":
+            # documentation files to compare with: Markdown/text docs, the likely API ones first
+            files = [f for f in proj.files() if re.search(r"\.(md|markdown|txt|rst|adoc)$", f, re.I)]
+            def score(f):
+                n = f.lower()
+                return (0 if "api" in n else 1 if n.startswith("docs/") or "/docs/" in n else 2 if "readme" in n else 3, n)
+            return self.ok({"files": sorted(files, key=score)[:200]})
+        if sub == "compare" and method == "POST":
+            docs = []
+            for f in (b.get("files") or [])[:30]:
+                try:
+                    docs.append((f, projects.read_text(proj.resolve(f, allow_root=False))[0]))
+                except projects.ToolError:
+                    pass
+            if not docs:
+                return self.fail(400, "Pick at least one documentation file.")
+            result = api.compare(api.find_routes(proj), docs)
+            if b.get("suggest"):
+                items = [{"title": "Document %s %s" % (r["method"], r["path"]), "file": docs[0][0],
+                          "why": "It's in the code (%s:%s) but not in the docs." % (r["file"], r["line"])} for r in result["undocumented"]]
+                items += [{"title": "Docs mention %s %s, which isn't in the code" % (d["method"], d["path"]), "file": d["file"],
+                           "why": "Remove it from %s or add the endpoint." % d["file"]} for d in result["stale"]]
+                h.projects.tests.suggest(pid, items, "you")
+            return self.ok(result)
+        if sub == "server" and method == "POST":
+            act = b.get("action")
+            if "command" in b or "url" in b:
+                h.projects.update(pid, {"dev_server": {"command": b.get("command", ""), "url": b.get("url", "")}})
+                proj = h.projects.get(pid)
+            cfg = proj.server_config()
+            if act == "start":
+                h.servers.stop(pid)
+                h.servers.start(pid, cfg["command"], cfg["url"], proj.root)
+            elif act == "stop":
+                h.servers.stop(pid)
+            return self.ok(dict(h.servers.status(pid), config=cfg))
+        return self.fail(404, "Unknown API action")
+
     def api_agent(self, method, parts, query):
         """Open the agent browser window, e.g. so the user can log in to sites first."""
         if method == "POST" and parts == ["open"]:
@@ -1088,6 +1274,7 @@ def serve(port=8765, open_page=True, app_window=True, idle_exit=True):
     except KeyboardInterrupt:
         pass
     finally:
+        hub.servers.stop_all()       # dev servers started from the app stop with it
         httpd.server_close()
 
 

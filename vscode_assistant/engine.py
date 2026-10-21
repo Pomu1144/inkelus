@@ -30,7 +30,7 @@ def context_size(system, messages):
     return size
 
 
-PROJECT_READS = {"read_file", "search_code", "list_files", "git_diff", "run_command"}
+PROJECT_READS = {"read_file", "search_code", "list_files", "git_diff", "run_command", "http_request", "server_logs"}
 
 
 def compact(messages, keep=2, keep_reads=6):
@@ -66,8 +66,10 @@ def needs_confirm(store, c, name, preview=None):
             return False
         if name in projects.ALWAYS_ASK:
             return True          # every push is approved on its own
-        if name == "run_command":
+        if name in ("run_command", "start_server"):
             return not (preview or {}).get("allowed")   # commands the user allowed for the project run without asking
+        if name in ("http_request", "run_api_collection"):
+            return not (preview or {}).get("safe")      # reading from this computer runs; anything else asks
         return not c.get("allow_all_tools")
     if c.get("allow_all_tools"):
         return False

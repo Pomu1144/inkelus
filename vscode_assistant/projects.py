@@ -13,6 +13,7 @@ use Git. It can only reach files inside the project folder, and never inside
 """
 import codecs
 import difflib
+import json
 import fnmatch
 import io
 import os
@@ -25,7 +26,7 @@ import threading
 import time
 import zipfile
 
-from . import gitops, library as libmod, testlog
+from . import api as apimod, gitops, library as libmod, tasks as taskmod, testlog
 from .store import new_id
 
 IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "env", ".tox", ".mypy_cache",
@@ -257,6 +258,24 @@ TOOLS = [
             "file": dict(_S, description="Where the test belongs, optional"),
             "command": dict(_S, description="Command that runs it, if it already exists, optional")},
             "required": ["title"]}}}, ["tests"]),
+    _fn("http_request", "Send an HTTP request to an API, e.g. the project's dev server, and get the status, headers and "
+        "body back. Use {{variables}} from the active API environment, e.g. {{baseUrl}}/api/users. Reading from "
+        "localhost (GET) runs straight away; anything else asks the user first.",
+        {"method": {"type": "string", "enum": list(apimod.METHODS)}, "url": _S,
+         "headers": {"type": "object", "description": "Header name to value"},
+         "json": {"description": "A JSON body (object or array)"}, "body": dict(_S, description="A raw text body")},
+        ["method", "url"]),
+    _fn("run_api_collection", "Run every request in a saved API collection (from the API tab) with its checks, "
+        "and get pass/fail per request. Results also go on the Tests list.", {"name": dict(_S, description="Collection name")},
+        ["name"]),
+    _fn("list_endpoints", "The HTTP endpoints defined in the project's code (Express, FastAPI, Flask, Django, Spring, "
+        "JAX-RS, ASP.NET, Go, Rails, Laravel, OpenAPI files), with file and line."),
+    _fn("start_server", "Start the project's dev server in the background (or restart it) and wait until it answers. "
+        "The user approves the command. Uses the project's configured server command unless you give one.",
+        {"command": dict(_S, description="Optional; defaults to the configured one"), "url": dict(_S, description="Where it listens")}),
+    _fn("stop_server", "Stop the project's dev server."),
+    _fn("server_logs", "The latest output from the project's dev server (errors, request logs).",
+        {"lines": dict(_I, description="How many lines, default 80")}),
     _fn("git_status", "Current branch, how far ahead/behind the remote it is, and the changed files."),
     _fn("git_diff", "Show uncommitted changes as a diff, for one file or the whole project.",
         {"path": dict(_S, description="Optional file")}),
@@ -274,6 +293,7 @@ TOOLS = [
 ]
 TOOL_NAMES = [t["function"]["name"] for t in TOOLS]
 READ_ONLY = {"list_files", "read_file", "search_code", "git_status", "git_diff", "git_log",
+             "list_endpoints", "server_logs", "stop_server",
              "suggest_tests"}     # suggest_tests only adds to the app's Tests list
 EDITS = {"edit_file", "write_file", "delete_file"}
 ALWAYS_ASK = {"git_push"}           # "allow all in this chat" never covers a push
@@ -287,6 +307,8 @@ or write_file (new files, or full rewrites). Keep changes focused on what was as
 - When you spot behaviour that has no test, or fix a bug a test would have caught, add it with suggest_tests.
 - Git: use git_status/git_diff/git_log to see the state; git_commit with a clear message when the user wants a commit; \
 git_pull and git_push only when the user asks. Never rewrite history.
+- APIs: list_endpoints finds the routes in the code; start_server runs the dev server; http_request calls an endpoint so you can see what it really returns (check your fix this way); server_logs shows server errors. Never guess a response.
+- If the user seems unsure how to build or run the project, explain the commands in plain words and offer to run them.
 - Paths are relative to the project root and use forward slashes.
 - When you're done, say briefly what you changed and why."""
 
@@ -380,6 +402,21 @@ class Project:
                 pass
         else:
             head.append("Not a Git repository")
+        kind = taskmod.detect(self.root)
+        if kind["type"]:
+            head.append("Project type: " + kind["type"])
+        if kind["tasks"]:
+            head.append("Commands: " + "; ".join("%s = `%s`" % (t["name"], t["command"]) for t in kind["tasks"]))
+        if self.manager is not None and getattr(self.manager, "servers", None) is not None:
+            srv = self.server_config()
+            st = self.manager.servers.status(self.id)["state"]
+            head.append("Dev server: %s (%s)%s" % (srv["command"] or "not set", st, ", at " + srv["url"] if srv["url"] else ""))
+            vals, _ = self.api_vars()
+            if vals:
+                head.append("API environment variables: " + ", ".join("{{%s}}" % k for k in vals))
+            cols = [c["name"] for c in self.manager.api.scope(self.id)["collections"]]
+            if cols:
+                head.append("Saved API collections: " + ", ".join(cols))
         tc = self.test_command()
         head.append("Test command: " + tc if tc else "No test command known yet")
         if self.manager is not None:
@@ -410,6 +447,31 @@ class Project:
                 raise ToolError("Use the git_push / git_pull tools instead of running git push or pull.")
             return {"kind": "command", "command": cmd, "cwd": self.root, "prefix": suggest_prefix(cmd),
                     "allowed": command_allowed(cmd, self.data.get("allowed_commands"))}
+        if name == "http_request":
+            req = self.http_from_args(a)
+            vals, secrets = self.api_vars()
+            b = apimod.build(req, vals)
+            if not b["url"] or not apimod.urllib.parse.urlsplit(b["url"]).hostname:
+                raise ToolError("Give a full URL, e.g. {{baseUrl}}/api/users or http://localhost:3000/api/users.")
+            return {"kind": "http", "method": b["method"], "url": apimod.mask(b["url"], secrets),
+                    "headers": [[k, apimod.mask(v, secrets)] for k, v in b["headers"] if k not in ("User-Agent", "Accept")],
+                    "body": apimod.mask((b["data"] or b"").decode("utf-8", "replace"), secrets)[:4000],
+                    "safe": b["method"] in apimod.SAFE_METHODS and apimod.is_local(b["url"]), "missing": b["missing"]}
+        if name == "run_api_collection":
+            col = self.find_collection(a.get("name"))
+            if not col:
+                names = [c["name"] for c in self.manager.api.scope(self.id)["collections"]]
+                raise ToolError("No API collection called %r. Saved collections: %s" % (a.get("name"), ", ".join(names) or "none"))
+            vals, _ = self.api_vars()
+            return {"kind": "api_run", "name": col["name"], "requests": ["%s %s" % (r["method"], r["name"]) for r in col["requests"]],
+                    "safe": all(apimod.is_safe(r, vals) for r in col["requests"])}
+        if name == "start_server":
+            cfg = self.server_config()
+            cmd = str(a.get("command") or cfg["command"]).strip()
+            if not cmd:
+                raise ToolError("There's no server command for this project yet. Ask the user how they start it, or give one.")
+            return {"kind": "command", "command": cmd, "cwd": self.root, "prefix": suggest_prefix(cmd), "server": True,
+                    "allowed": command_allowed(cmd, self.data.get("allowed_commands"))}
         if name == "git_push":
             pv = gitops.push_preview(self.root)
             if pv["branch"] in (self.data.get("protected") or []):
@@ -431,6 +493,37 @@ class Project:
         if name == "git_branch":
             return {"kind": "branch", "name": str(a.get("name") or ""), "create": bool(a.get("create"))}
         return None
+
+    # APIs and the dev server
+    def server_config(self):
+        cfg = self.data.get("dev_server") or {}
+        cmd, url = cfg.get("command", ""), cfg.get("url", "")
+        if not cmd:
+            gcmd, gurl = apimod.guess_server(self.root)
+            cmd, url = gcmd, url or gurl
+        return {"command": cmd, "url": url or "http://localhost:3000"}
+
+    def api_vars(self):
+        env = self.manager.api.env(self.id) if getattr(self.manager, "api", None) is not None else None
+        vals, secrets = apimod.variables(env)
+        if "baseUrl" not in vals:
+            vals["baseUrl"] = self.server_config()["url"].rstrip("/")
+        return vals, secrets
+
+    def http_from_args(self, a):
+        hdrs = a.get("headers") if isinstance(a.get("headers"), dict) else {}
+        req = apimod.blank_request("AI request", str(a.get("method") or "GET").upper(), str(a.get("url") or ""))
+        req["headers"] = [{"key": str(k), "value": str(v), "enabled": True} for k, v in hdrs.items()]
+        if a.get("json") is not None:
+            req["body"] = {"mode": "json", "text": a["json"] if isinstance(a["json"], str) else json.dumps(a["json"]), "form": []}
+        elif a.get("body"):
+            req["body"] = {"mode": "text", "text": str(a["body"]), "form": []}
+        return req
+
+    def find_collection(self, name):
+        cols = self.manager.api.scope(self.id)["collections"]
+        n = (name or "").strip().lower()
+        return next((c for c in cols if c["name"].lower() == n), None) or next((c for c in cols if n and n in c["name"].lower()), None)
 
     def check_standards(self, name, rel, before, after):
         """Documentation standards that apply to this file. A whole-file write that misses a required section,
@@ -555,6 +648,14 @@ class Project:
             return "%s (%d lines)\n%s%s" % (self.rel(full), total, body or "(empty file)", note)
         if name == "search_code":
             return self.search(a)
+        if name == "list_endpoints":
+            routes = apimod.find_routes(self)
+            if not routes:
+                return "No HTTP endpoints found in the code."
+            return "%d endpoint%s:\n%s" % (len(routes), "" if len(routes) == 1 else "s", "\n".join(
+                "%-7s %s   (%s%s)" % (r["method"], r["path"], r["file"], ":%d" % r["line"] if r["line"] else "") for r in routes[:300]))
+        if name in ("http_request", "run_api_collection", "start_server", "stop_server", "server_logs"):
+            return self.run_api(name, a, cancel)
         if name == "suggest_tests":
             if self.manager is None:
                 raise ToolError("The Tests list isn't available.")
@@ -624,6 +725,57 @@ class Project:
             gitops.switch(self.root, a.get("name"), bool(a.get("create")))
             return "Now on branch %s." % a.get("name")
         raise ToolError("Unknown tool %s." % name)
+
+    def run_api(self, name, a, cancel=None):
+        m = self.manager
+        if m is None or getattr(m, "servers", None) is None:
+            raise ToolError("The API tools aren't available.")
+        if name == "http_request":
+            req = self.http_from_args(a)
+            vals, secrets = self.api_vars()
+            res = apimod.send(req, vals)
+            m.api.add_history(self.id, req, res, "ai")
+            if res.get("error"):
+                hint = ""
+                if "refused" in res["error"].lower():
+                    st = m.servers.status(self.id)["state"]
+                    hint = " The dev server is %s; start it with start_server." % st
+                return apimod.mask("%s %s\nError: %s%s" % (res["method"], res["url"], res["error"], hint), secrets)
+            hdr = "\n".join("%s: %s" % (k, v) for k, v in res["headers"]
+                             if k.lower() in ("content-type", "location", "set-cookie", "www-authenticate", "allow", "cache-control"))
+            text = "%s %s\nHTTP %s %s · %s ms · %s bytes%s\n%s\n\n%s" % (
+                res["method"], res["url"], res["status"], res["reason"], res["ms"], res["size"],
+                " (missing variables: %s)" % ", ".join(res["missing"]) if res["missing"] else "", hdr, apimod.pretty_body(res))
+            return apimod.mask(text, secrets)
+        if name == "run_api_collection":
+            col = self.find_collection(a.get("name"))
+            vals, secrets = self.api_vars()
+            t0 = time.time()
+            results, text = apimod.run_collection(col, vals, secrets)
+            failed = sum(1 for r in results if not r["pass"])
+            m.tests.add_run(self.id, "API: " + col["name"], 1 if failed else 0, text, "ai", time.time() - t0)
+            return text
+        if name == "start_server":
+            cfg = self.server_config()
+            cmd = str(a.get("command") or cfg["command"]).strip()
+            url = str(a.get("url") or cfg["url"]).strip()
+            m.servers.stop(self.id)
+            m.servers.start(self.id, cmd, url, self.root)
+            st = m.servers.wait_ready(self.id, 90)
+            tail = "\n".join(st.get("log", "").splitlines()[-30:])
+            if st["state"] == "exited":
+                return "The server stopped straight away (exit code %s). Its output:\n%s" % (st.get("code"), tail)
+            listening = apimod.Servers.listening(url)
+            return "Server %s: `%s`, %s at %s.\nRecent output:\n%s" % (
+                "running" if listening else "started", cmd, "answering" if listening else "not answering yet", url, tail)
+        if name == "stop_server":
+            m.servers.stop(self.id)
+            return "Stopped the dev server."
+        if name == "server_logs":
+            st = m.servers.status(self.id)
+            n = max(5, min(int(a.get("lines") or 80), 400))
+            lines = st.get("log", "").splitlines()[-n:]
+            return "Server is %s.\n%s" % (st["state"], "\n".join(lines) or "(no output yet)")
 
     def search(self, a):
         q = str(a.get("query") or "")
@@ -794,6 +946,9 @@ class Projects:
             d["allowed_commands"] = [" ".join(str(x).split())[:200] for x in b["allowed_commands"] if str(x).strip()][:100]
         if "test_command" in b:
             d["test_command"] = " ".join(str(b["test_command"]).split())[:300]
+        if isinstance(b.get("dev_server"), dict):
+            d["dev_server"] = {"command": " ".join(str(b["dev_server"].get("command") or "").split())[:300],
+                               "url": str(b["dev_server"].get("url") or "").strip()[:300]}
         if isinstance(b.get("protected"), list):
             d["protected"] = [str(x).strip()[:100] for x in b["protected"] if str(x).strip()][:50]
         self.store.save_settings()

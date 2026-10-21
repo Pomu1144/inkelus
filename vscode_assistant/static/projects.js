@@ -55,9 +55,26 @@ window.VAProjects = function (app) {
         ok: pv.action === "delete" ? "Delete file" : "Apply change", allowAll: "Allow all edits in this chat", note: true, wide: true,
       };
     }
+    if (pv.kind === "http") {
+      return {
+        title: "Send " + pv.method + " request?",
+        body: '<p class="dim small">The AI wants to call an API' + (pv.missing && pv.missing.length ? " (unknown variables: " + esc(pv.missing.join(", ")) + ")" : "") + ':</p>' +
+          '<pre class="cmd">' + esc(pv.method + " " + pv.url + (pv.headers.length ? "\n" + pv.headers.map(h => h[0] + ": " + h[1]).join("\n") : "") +
+          (pv.body ? "\n\n" + pv.body : "")) + "</pre>",
+        ok: "Send", allowAll: null, note: true,
+      };
+    }
+    if (pv.kind === "api_run") {
+      return {
+        title: "Run the " + pv.name + " collection?",
+        body: '<p class="dim small">It sends these requests, some of which can change data:</p><div class="commits">' +
+          pv.requests.map(r => "<div><code>" + esc(r) + "</code></div>").join("") + "</div>",
+        ok: "Run collection", allowAll: null, note: true,
+      };
+    }
     if (pv.kind === "command") {
       return {
-        title: "Run a command?",
+        title: pv.server ? "Start the dev server?" : "Run a command?",
         body: '<p class="dim small">In <code>' + esc(pv.cwd) + "</code></p><pre class=\"cmd\">$ " + esc(pv.command) + "</pre>" +
           (pv.prefix ? '<label class="check"><input type="checkbox" id="allowPrefix" value="' + esc(pv.prefix) + '"> Always allow <code>' +
             esc(pv.prefix) + "</code> in this project</label>" : ""),
@@ -175,7 +192,7 @@ window.VAProjects = function (app) {
       $("#projPick").value = P.cur;
       return;
     }
-    if (P.cur !== id) { P.file = null; P.diffPath = null; P.detail = null; P.tests = null; P.openDirs = new Set(); P.unchecked = new Set(); }
+    if (P.cur !== id) { P.file = null; P.diffPath = null; P.detail = null; P.tests = null; P.openDirs = new Set(); P.unchecked = new Set(); P.kind = null; }
     P.cur = id;
     store("va-project", id);
     const p = cur();
@@ -203,11 +220,24 @@ window.VAProjects = function (app) {
     renderChanges();
     renderHistory();
     loadTests();
+    if (!P.kind) api("GET", "projects/" + id + "/tasks").then(k => { if (id === P.cur) { P.kind = k; renderTasks(); } }).catch(() => {});
+    else renderTasks();
     if (reloadFile && P.file && !P.file.dirty && P.file.project === id) {
       if (P.files.includes(P.file.path)) await openFile(P.file.path, true);
       else { P.file = null; renderEditor(); }
     } else if (!P.file || P.file.project !== id) renderEditor();
     if (P.diffPath) showDiff(P.diffPath);
+  }
+
+  // build / run / test / clean, from the kind of project (Maven, Gradle, NetBeans Ant, npm…)
+  function renderTasks() {
+    const k = P.kind || { type: "", tasks: [] };
+    const bar = $("#taskBar");
+    bar.hidden = !k.type && !k.tasks.length;
+    bar.innerHTML = (k.type ? '<span class="ptype">' + esc(k.type) + "</span>" : "") +
+      k.tasks.map((t, i) => '<button class="btn small" data-task="' + i + '" title="' + esc(t.command) + '">' +
+        icon({ Build: "tool", Run: "play", Test: "check", Clean: "clear" }[t.name] || "code") + esc(t.name) + "</button>").join("") +
+      '<button class="btn small" data-task="help" title="Ask the AI to explain how this project is built and run">' + icon("spark") + "How do I run this?</button>";
   }
 
   // git bar
@@ -803,6 +833,22 @@ window.VAProjects = function (app) {
     $("#projPick").onchange = guard(() => openProject($("#projPick").value));
     $("#projSettings").onclick = settingsDialog;
     $("#projChat").onclick = guard(() => chatAbout());
+    $("#taskBar").onclick = guard(async e => {
+      const b = e.target.closest("[data-task]");
+      if (!b) return;
+      if (b.dataset.task === "help") {
+        await chatAbout("I'm not sure how this project works. Explain in plain words what kind of project it is, how to build it, run it and test it, " +
+          "what I need installed, and run the build to check it works. If something fails, tell me what it means and how to fix it.");
+        return;
+      }
+      const t = P.kind.tasks[+b.dataset.task];
+      if (P.running[P.cur]) { toast("A command is still running in the Terminal. Stop it first.", true); return; }
+      termWrite(P.cur, (P.term[P.cur] ? "\n" : "") + "$ " + t.command + "\n");
+      $("#term").classList.remove("collapsed");
+      const r = await api("POST", "projects/" + P.cur + "/terminal", { command: t.command, test: t.name === "Test" });
+      P.running[P.cur] = r.run;
+      renderTerm();
+    });
     $("#gitBar").onclick = guard(async e => {
       const b = e.target.closest("[data-g]");
       if (!b) return;
