@@ -110,9 +110,18 @@ window.VAContext = function (app) {
     const threads = g.threads.filter(t => t.some(i => matches(C.byId[i])));
     $$("#ctxMode .tab").forEach(t => t.classList.toggle("active", t.dataset.mode === C.mode));
     board.classList.toggle("tree-mode", C.mode === "tree");
+    board.classList.toggle("graph-mode", C.mode === "graph");
     // your own notes always show; other unlinked items only with Unlinked ticked
     const loose = g.loose.filter(i => (C.loose || C.byId[i].kind === "note") && matches(C.byId[i]));
     const hidden = g.loose.filter(i => C.byId[i].kind !== "note").length;
+    if (C.mode !== "graph") stopGraph();
+    if (C.mode === "graph") {
+      const shown = new Set([].concat(...g.threads));
+      g.loose.forEach(i => { if (C.loose || C.byId[i].kind === "note") shown.add(i); });
+      renderGraph(Array.from(shown));
+      renderDetail();
+      return;
+    }
     if (C.mode === "tree") {
       const loose2 = g.loose.filter(i => (C.loose || C.byId[i].kind === "note") && matches(C.byId[i]));
       board.innerHTML = threads.map(treeHTML).join("") +
@@ -211,6 +220,253 @@ window.VAContext = function (app) {
     for (let p = C.parentOf[id]; p; p = C.parentOf[p]) C.collapsed.delete(p);
   }
 
+  // ── the graph: every item a dot, every link a line, laid out by a small force simulation ──
+  const KCOL = { jira: "#4c9aff", pr: "#6cc28a", mail: "#d7b45a", note: "#b48ee8" };
+  const GV = { nodes: [], links: [], at: {}, pos: {}, cam: { x: 0, y: 0, k: 1 }, alpha: 0, raf: 0, hover: "", drag: null, pan: null, fitted: false, colors: null };
+  function renderGraph(ids) {
+    const board = $("#ctxBoard");
+    if (!board.querySelector(".gv")) {
+      board.innerHTML = '<div class="gv"><canvas id="ctxCanvas" tabindex="0" aria-label="Graph of linked items"></canvas>' +
+        '<div class="gv-tools"><button class="icon-btn" data-gv="in" title="Zoom in">' + icon("plus") + '</button><button class="icon-btn" data-gv="out" title="Zoom out">' +
+        '<svg class="i" viewBox="0 0 16 16"><path d="M3 8h10"/></svg></button><button class="icon-btn" data-gv="fit" title="Fit everything">' + icon("refresh") + "</button></div>" +
+        '<div class="gv-legend">' + KINDS.map(([k, l]) => '<span><i style="background:' + KCOL[k] + '"></i>' + l + "</span>").join("") +
+        '<span class="faint">Drag to move · scroll to zoom · click for details</span></div></div>';
+      wireGraph(board.querySelector("canvas"));
+      GV.fitted = false;
+    }
+    const css = getComputedStyle(document.documentElement);
+    GV.colors = { line: css.getPropertyValue("--line-2").trim() || "#444", text: css.getPropertyValue("--text").trim() || "#ddd",
+      faint: css.getPropertyValue("--faint").trim() || "#777", accent: css.getPropertyValue("--accent").trim() || "#d97757", bg: css.getPropertyValue("--panel-2").trim() || "#222" };
+    const set = new Set(ids), fresh = [];
+    GV.nodes = ids.map(i => {
+      const n = C.byId[i];
+      let p = GV.pos[i];
+      if (!p) { p = GV.pos[i] = { x: 0, y: 0, vx: 0, vy: 0 }; fresh.push(i); }
+      return Object.assign(p, { id: i, kind: n.kind, deg: Array.from(adj[i] || []).filter(j => set.has(j)).length, hit: matches(n) });
+    });
+    GV.at = {};
+    GV.nodes.forEach(n => (GV.at[n.id] = n));
+    // each thread gets its own spot, biggest in the middle and the rest spiralling out, so separate threads read as separate islands
+    const groups = C.graph.threads.map(t => t.filter(i => set.has(i))).filter(t => t.length)
+      .concat(ids.filter(i => !(adj[i] || new Set()).size).map(i => [i]));
+    let ring = 0, angle = 0;
+    groups.forEach((grp, gi) => {
+      const size = Math.sqrt(grp.length) * 85;
+      let ax = 0, ay = 0;
+      if (gi > 0) { ring = Math.max(ring, 260) + size * 0.35; angle += size / ring + 0.5; ax = Math.cos(angle) * ring; ay = Math.sin(angle) * ring; ring += size * 0.08; }
+      grp.forEach(i => { GV.at[i].ax = ax; GV.at[i].ay = ay; });
+    });
+    GV.links = C.graph.edges.filter(([a, b]) => set.has(a) && set.has(b)).map(([a, b]) => ({ a: GV.at[a], b: GV.at[b], hand: isManual(a, b) }));
+    // new items start next to something they link to (or on a ring), so the layout settles quickly
+    fresh.forEach((i, k) => {
+      const nb = Array.from(adj[i] || []).map(j => GV.pos[j]).find(q => q && !fresh.includes(q.id));
+      const p = GV.pos[i], a = k * 2.4;
+      const home = GV.at[i] || {};
+      if (nb) { p.x = nb.x + Math.cos(a) * 30; p.y = nb.y + Math.sin(a) * 30; }
+      else { const r = 20 + 10 * Math.sqrt(k); p.x = (home.ax || 0) + Math.cos(a) * r; p.y = (home.ay || 0) + Math.sin(a) * r; }
+    });
+    graphResize();
+    if (fresh.length) {
+      GV.alpha = 1;
+      for (let t = 0; t < (GV.nodes.length > 400 ? 80 : 260); t++) graphTick();   // settle before the first frame
+    }
+    if (!GV.fitted) { graphFit(); GV.fitted = true; GV.touched = false; }
+    GV.alpha = Math.max(GV.alpha, fresh.length ? 0.3 : 0.05);
+    graphRun();
+  }
+  function graphTick() {
+    const ns = GV.nodes, n = ns.length, al = GV.alpha;
+    for (let i = 0; i < n; i++) {               // every pair pushes apart
+      const p = ns[i];
+      for (let j = i + 1; j < n; j++) {
+        const q = ns[j];
+        let dx = q.x - p.x, dy = q.y - p.y, d2 = dx * dx + dy * dy;
+        if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
+        if (d2 > 640000) continue;
+        const d = Math.sqrt(d2), f = -(1400 / d2 + 3 / d) * al;
+        p.vx += dx / d * f; p.vy += dy / d * f; q.vx -= dx / d * f; q.vy -= dy / d * f;
+      }
+    }
+    GV.links.forEach(l => {                     // links pull together, like springs
+      const dx = l.b.x - l.a.x, dy = l.b.y - l.a.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const want = 80 + 8 * Math.min(l.a.deg, l.b.deg), f = (d - want) / d * 0.1 * al;
+      l.a.vx += dx * f; l.a.vy += dy * f; l.b.vx -= dx * f; l.b.vy -= dy * f;
+    });
+    ns.forEach(p => {                           // a gentle pull to the middle keeps clusters and loose dots close
+      const g = (p.deg ? 0.007 : 0.03) * al;
+      p.vx -= (p.x - (p.ax || 0)) * g; p.vy -= (p.y - (p.ay || 0)) * g;
+      if (p.fixed) { p.vx = p.vy = 0; return; }
+      p.vx *= 0.6; p.vy *= 0.6;
+      p.x += p.vx; p.y += p.vy;
+    });
+    for (let i = 0; i < n; i++) {               // and never closer than their size plus room for a name
+      const p = ns[i], rp = radius(p);
+      for (let j = i + 1; j < n; j++) {
+        const q = ns[j], dx = q.x - p.x, dy = q.y - p.y, min = rp + radius(q) + 26, d2 = dx * dx + dy * dy;
+        if (d2 >= min * min || d2 === 0) continue;
+        const d = Math.sqrt(d2), push = (min - d) / d * 0.5;
+        if (!p.fixed) { p.x -= dx * push; p.y -= dy * push; }
+        if (!q.fixed) { q.x += dx * push; q.y += dy * push; }
+      }
+    }
+    GV.alpha *= 0.985;
+  }
+  function graphRun() {
+    if (GV.raf) return;
+    const step = () => {
+      GV.raf = 0;
+      if (app.S.view !== "context" || C.mode !== "graph") return;
+      if (GV.alpha > 0.004 || GV.drag) { graphTick(); GV.raf = requestAnimationFrame(step); }
+      else if (!GV.touched) { graphFit(); GV.touched = true; }   // once it settles, frame it (until you pan or zoom yourself)
+      graphDraw();
+    };
+    GV.raf = requestAnimationFrame(step);
+  }
+  function stopGraph() { if (GV.raf) cancelAnimationFrame(GV.raf); GV.raf = 0; }
+  function graphResize() {
+    const cv = $("#ctxCanvas");
+    if (!cv) return;
+    const r = cv.parentElement.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    cv.width = Math.max(1, r.width * dpr); cv.height = Math.max(1, r.height * dpr);
+    cv.style.width = r.width + "px"; cv.style.height = r.height + "px";
+    GV.w = r.width; GV.h = r.height;
+    graphDraw();
+  }
+  const radius = n => 5 + Math.sqrt(n.deg) * 2.6;
+  const toScreen = p => ({ x: (p.x - GV.cam.x) * GV.cam.k + GV.w / 2, y: (p.y - GV.cam.y) * GV.cam.k + GV.h / 2 });
+  const toWorld = (sx, sy) => ({ x: (sx - GV.w / 2) / GV.cam.k + GV.cam.x, y: (sy - GV.h / 2) / GV.cam.k + GV.cam.y });
+  function graphFit() {
+    if (!GV.nodes.length || !GV.w) return;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    GV.nodes.forEach(p => { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); });
+    GV.cam.x = (x0 + x1) / 2; GV.cam.y = (y0 + y1) / 2;
+    GV.cam.k = Math.max(0.15, Math.min(2.2, Math.min(GV.w / (x1 - x0 + 160), GV.h / (y1 - y0 + 120))));
+  }
+  function graphFocus(id) {
+    const p = GV.at[id];
+    if (!p) return;
+    const s = toScreen(p);
+    if (s.x < 60 || s.y < 60 || s.x > GV.w - 60 || s.y > GV.h - 60) { GV.cam.x = p.x; GV.cam.y = p.y; }
+  }
+  function label(n) {
+    const it = C.byId[n.id];
+    const t = it.kind === "jira" ? it.id : it.kind === "pr" ? it.id.replace(/^[^/]+\//, "") : it.title;
+    return t.length > 34 ? t.slice(0, 33) + "…" : t;
+  }
+  function graphDraw() {
+    const cv = $("#ctxCanvas");
+    if (!cv || !GV.colors) return;
+    const ctx = cv.getContext("2d"), dpr = window.devicePixelRatio || 1, k = GV.cam.k, c = GV.colors;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, GV.w, GV.h);
+    // what to light up: the hovered (or selected) item and its neighbours, like Obsidian's graph
+    const focus = GV.hover || C.sel;
+    const near = focus ? new Set([focus].concat(Array.from(adj[focus] || []))) : null;
+    const filtering = !!C.filter;
+    GV.links.forEach(l => {
+      const a = toScreen(l.a), b = toScreen(l.b);
+      const on = near && (l.a.id === focus || l.b.id === focus);
+      ctx.globalAlpha = near ? (on ? 1 : 0.12) : filtering && !(l.a.hit && l.b.hit) ? 0.15 : 0.7;
+      ctx.strokeStyle = on ? c.accent : l.hand ? KCOL.note : c.line;
+      ctx.lineWidth = on ? 2 : 1.2;
+      ctx.setLineDash(l.hand ? [5, 4] : []);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    });
+    ctx.setLineDash([]);
+    const labels = [];
+    GV.nodes.forEach(n => {
+      const s = toScreen(n), r = radius(n) * Math.max(0.6, Math.min(1.6, k));
+      if (s.x < -40 || s.y < -40 || s.x > GV.w + 40 || s.y > GV.h + 40) return;
+      const lit = near ? near.has(n.id) : !filtering || n.hit;
+      ctx.globalAlpha = lit ? 1 : 0.18;
+      ctx.fillStyle = KCOL[n.kind];
+      ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2); ctx.fill();
+      if (n.id === C.sel || n.id === GV.hover) { ctx.lineWidth = 2.5; ctx.strokeStyle = c.text; ctx.beginPath(); ctx.arc(s.x, s.y, r + 3, 0, Math.PI * 2); ctx.stroke(); }
+      // names fade in as you zoom; hubs, the focus and its neighbours always get one
+      const show = (near && near.has(n.id)) || (!near && (k > 1.15 || n.deg >= 4 || (filtering && n.hit)));
+      if (show) labels.push([n, s, r, lit]);
+    });
+    ctx.font = "12px " + (getComputedStyle(document.body).fontFamily || "sans-serif");
+    ctx.textAlign = "center";
+    // most important names first (the focus and its neighbours, then hubs); a name that would overlap one already drawn is skipped
+    const rank = n => (n.id === focus ? 1e6 : 0) + (near && near.has(n.id) ? 1e5 : 0) + n.deg * 10 + (n.hit && filtering ? 1e4 : 0);
+    labels.sort((x, y) => rank(y[0]) - rank(x[0]));
+    const placed = GV.nodes.filter(n => !near || near.has(n.id)).map(n => { const q = toScreen(n), r = radius(n) * Math.max(0.6, Math.min(1.6, k)); return [q.x - r, q.y - r, q.x + r, q.y + r]; });
+    labels.forEach(([n, s, r, lit]) => {
+      const t = label(n), w = ctx.measureText(t).width, box = [s.x - w / 2 - 2, s.y + r + 3, s.x + w / 2 + 2, s.y + r + 18];
+      if (n.id !== focus && placed.some(b => box[0] < b[2] && box[2] > b[0] && box[1] < b[3] && box[3] > b[1])) return;
+      placed.push(box);
+      ctx.globalAlpha = lit ? 1 : 0.3;
+      ctx.lineWidth = 3; ctx.strokeStyle = c.bg; ctx.strokeText(t, s.x, s.y + r + 14);
+      ctx.fillStyle = n.id === focus ? c.text : c.faint;
+      ctx.fillText(t, s.x, s.y + r + 14);
+    });
+    ctx.globalAlpha = 1;
+  }
+  function nodeAt(sx, sy) {
+    let best = null, bd = Infinity;
+    GV.nodes.forEach(n => {
+      const s = toScreen(n), d = Math.hypot(s.x - sx, s.y - sy), r = radius(n) * Math.max(0.6, Math.min(1.6, GV.cam.k)) + 4;
+      if (d < r && d < bd) { best = n; bd = d; }
+    });
+    return best;
+  }
+  function wireGraph(cv) {
+    cv.screenOf = id => (GV.at[id] ? toScreen(GV.at[id]) : null);   // where an item is drawn (used by tests)
+    const xy = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+    cv.addEventListener("pointerdown", e => {
+      const [x, y] = xy(e), n = nodeAt(x, y);
+      cv.setPointerCapture(e.pointerId);
+      if (n) { GV.drag = { n, moved: false }; n.fixed = true; }
+      else GV.pan = { x, y, cx: GV.cam.x, cy: GV.cam.y, moved: false };
+    });
+    cv.addEventListener("pointermove", e => {
+      const [x, y] = xy(e);
+      if (GV.drag) {
+        const w = toWorld(x, y);
+        GV.drag.n.x = w.x; GV.drag.n.y = w.y; GV.drag.moved = true;
+        GV.alpha = Math.max(GV.alpha, 0.25);
+        graphRun();
+      } else if (GV.pan) {
+        if (Math.abs(x - GV.pan.x) + Math.abs(y - GV.pan.y) > 3) GV.pan.moved = true;
+        GV.touched = true;
+        GV.cam.x = GV.pan.cx - (x - GV.pan.x) / GV.cam.k; GV.cam.y = GV.pan.cy - (y - GV.pan.y) / GV.cam.k;
+        graphDraw();
+      } else {
+        const n = nodeAt(x, y), id = n ? n.id : "";
+        cv.style.cursor = n ? "pointer" : "grab";
+        if (id !== GV.hover) { GV.hover = id; cv.title = n ? C.byId[id].title : ""; graphDraw(); }
+      }
+    });
+    cv.addEventListener("pointerup", () => {
+      if (GV.drag) {
+        GV.drag.n.fixed = false;
+        if (!GV.drag.moved) select(GV.drag.n.id, true);
+        GV.drag = null;
+      } else if (GV.pan) {
+        if (!GV.pan.moved && C.sel) select(C.sel);      // a click on empty space clears the selection
+        GV.pan = null;
+      }
+    });
+    cv.addEventListener("pointerleave", () => { if (GV.hover && !GV.drag) { GV.hover = ""; graphDraw(); } });
+    cv.addEventListener("wheel", e => {
+      e.preventDefault();
+      GV.touched = true;
+      const [x, y] = xy(e), before = toWorld(x, y);
+      GV.cam.k = Math.max(0.1, Math.min(4, GV.cam.k * Math.exp(-e.deltaY * 0.0015)));
+      const after = toWorld(x, y);
+      GV.cam.x += before.x - after.x; GV.cam.y += before.y - after.y;
+      graphDraw();
+    }, { passive: false });
+    cv.parentElement.addEventListener("click", e => {
+      const b = e.target.closest("[data-gv]");
+      if (!b) return;
+      if (b.dataset.gv === "fit") graphFit();
+      else GV.cam.k = Math.max(0.1, Math.min(4, GV.cam.k * (b.dataset.gv === "in" ? 1.3 : 1 / 1.3)));
+      graphDraw();
+    });
+  }
+
   // lines between linked cards, drawn in each band's own SVG layer
   function drawLinks() {
     $$("#ctxBoard .cband").forEach(b => {
@@ -292,6 +548,7 @@ window.VAContext = function (app) {
   }
   function select(id, keep) {
     C.sel = C.sel === id && !keep ? "" : id;
+    if (C.mode === "graph") { if (C.sel) graphFocus(C.sel); graphDraw(); renderDetail(); return; }
     if (C.sel && C.mode === "tree" && !$('#ctxBoard .ccard[data-id="' + CSS.escape(C.sel) + '"]')) { reveal(C.sel); render(); }
     $$("#ctxBoard .ccard").forEach(el => el.classList.toggle("sel", el.dataset.id === C.sel));
     highlight(C.sel, !!C.sel);
@@ -448,7 +705,7 @@ window.VAContext = function (app) {
         '<p class="faint small">Fix them in Settings › Work context, then sync again. Everything else that synced is shown.</p><div class="row end"><button class="btn primary" data-a="close">Close</button></div>');
       d.querySelector('[data-a="close"]').onclick = closeModal;
     });
-    if (window.ResizeObserver) new ResizeObserver(() => { if (app.S.view === "context" && C.mode !== "tree") drawLinks(); }).observe(board);
+    if (window.ResizeObserver) new ResizeObserver(() => { if (app.S.view !== "context") return; if (C.mode === "columns") drawLinks(); else if (C.mode === "graph") graphResize(); }).observe(board);
     $$("#ctxMode .tab").forEach(t => (t.onclick = () => {
       C.mode = t.dataset.mode;
       try { localStorage.setItem("va-ctx-mode", C.mode); } catch (_) { /* private window */ }

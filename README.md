@@ -233,10 +233,18 @@ other links show as small link buttons that jump to the other item. To see a
 thread from another item's point of view, select it and press **Start the
 tree here**.
 
+**Graph** is a mind map, like Obsidian's graph view. Every item is a dot,
+coloured by kind and bigger the more it's linked, and every link is a line.
+The layout arranges itself, so linked items pull together and each
+thread forms its own island. Hover a dot to light up what it's linked to;
+click it for its details. Drag dots around, drag the background to pan,
+scroll to zoom (names appear as you zoom in), and press the fit button to
+see everything. Links you drew are dashed purple.
+
 **Columns** shows the same threads as bands with Jira, pull request and
 email columns and lines between linked items (a dashed line joins an issue
 and an email directly). Notes you add get their own column. Switch views
-with **Tree / Columns** at the top. In either view, hover an item to highlight its links; click it for its
+with **Tree / Graph / Columns** at the top. In any view, hover an item to highlight its links; click it for its
 details, everything linked to it, **Open** (in GitHub or Jira) and **Ask
 about this**. Filter by words, and tick **Unlinked** to see items that don't
 mention anything else. Problems from a sync (a wrong token, a missing repo)
