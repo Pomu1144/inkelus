@@ -30,7 +30,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import agent_browser, api, apirun, engine, gitops, net, projects, providers, realtime, tasks, web
+from . import agent_browser, api, apirun, context, engine, gitops, net, projects, providers, realtime, tasks, web
 from .library import KINDS, Library
 from .store import Store, new_id
 
@@ -61,6 +61,9 @@ class Hub:
         self.api_reports = {}        # collection run reports, for downloading
         self.rt = realtime.Sessions(self.publish)   # open WebSocket / SSE connections
         self.oauth_pending = {}      # OAuth state -> {"auth", "vals", "verifier", "redirect"}
+        self.context_path = os.path.join(self.store.dir, "context.json")
+        self.context = context.Graph.load(self.context_path)   # the last work-context sync
+        self.context_syncing = False
         self.token = secrets.token_urlsafe(24)
         self.lock = threading.RLock()
         self.clients = []           # one queue per open event stream
@@ -88,6 +91,27 @@ class Hub:
             finally:
                 self.script_calls.pop(rid, None)
         return apirun.node_runner(ctx)
+
+    # work context: GitHub PRs, Jira issues and email, synced on a worker thread
+    def context_sync(self):
+        with self.lock:
+            if self.context_syncing:
+                return False
+            self.context_syncing = True
+        cfg = dict(context.DEFAULTS, **(self.store.settings.get("context") or {}))
+
+        def work():
+            try:
+                g = context.sync(cfg)
+                g.save(self.context_path)
+                self.context = g
+                self.publish({"type": "context", "ok": True, "errors": g.errors, "count": len(g.nodes)})
+            except Exception as e:      # keep the last good sync
+                self.publish({"type": "context", "ok": False, "errors": [str(e)]})
+            finally:
+                self.context_syncing = False
+        threading.Thread(target=work, daemon=True).start()
+        return True
 
     # OAuth 2.0 authorization code: the user signs in in a browser window, which comes back to /oauth/callback
     def oauth_begin(self, auth, vals, redirect):
@@ -232,7 +256,7 @@ class Hub:
         agent = engine.agent_for(self.store) if c.get("agent") else None
         threading.Thread(target=engine.run_turn, daemon=True,
                          args=(self.store, self.library, c, conn, model, cancel, emit, ask_tool, box, agent,
-                               self.projects)).start()
+                               self.projects, lambda: self.context)).start()
         self.publish({"type": "chat", "chat": chat_summary(c, self), "messages": c["messages"]})
 
 
@@ -245,6 +269,7 @@ def public_settings(s):
     out = json.loads(json.dumps(s))
     for c in out["connections"]:
         c["key"] = KEY_MASK if c.get("key") else ""
+    out["context"] = context.masked(s.get("context"), KEY_MASK)
     return out
 
 
@@ -446,7 +471,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.ok({"chat": c, "busy": c["id"] in h.streams})
             if method == "PATCH":
                 b = self.body()
-                for k in ("title", "model", "browser", "agent", "docs", "template", "group", "project"):
+                for k in ("title", "model", "browser", "agent", "context", "docs", "template", "group", "project"):
                     if k in b:
                         c[k] = b[k]
                 if "title" in b:
@@ -645,6 +670,8 @@ class Handler(BaseHTTPRequestHandler):
                     moved = True
             if moved:
                 h.save_chats()
+        if isinstance(b.get("context"), dict):
+            context.update_settings(s.setdefault("context", {}), b["context"], KEY_MASK)
         for k in ("last_model", "default_conn", "web_theme"):
             if k in b:
                 s[k] = b[k]
@@ -735,6 +762,18 @@ class Handler(BaseHTTPRequestHandler):
     def api_fs(self, method, parts, query):
         """Folders on this computer, for the "open a folder" picker."""
         return self.ok(projects.list_dirs((query.get("path") or [""])[0]))
+
+    def api_context(self, method, parts, query):
+        h = self.hub
+        if method == "GET":
+            return self.ok({"graph": h.context.for_page(), "syncing": h.context_syncing,
+                            "sources": context.configured(h.store.settings.get("context") or {})})
+        if method == "POST" and (self.body().get("action") == "sync"):
+            if not context.configured(h.store.settings.get("context") or {}):
+                return self.fail(400, "Add GitHub, Jira or email in Settings › Work context first.")
+            h.context_sync()
+            return self.ok({"syncing": True})
+        return self.fail(405, "Method not allowed")
 
     def api_projects(self, method, parts, query):
         h = self.hub

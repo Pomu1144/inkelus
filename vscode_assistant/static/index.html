@@ -17,6 +17,7 @@
     <nav class="nav">
       <a data-view="chat" class="active" title="Chat"><svg viewBox="0 0 16 16"><path d="M2 3h12v8H7l-4 3v-3H2z"/></svg><span class="lbl">Chat</span></a>
       <a data-view="projects" title="Projects"><svg viewBox="0 0 16 16"><path d="M1.5 3.5h5l1.5 1.5h6.5v8.5h-13z M5.5 8l-1.5 1.5 1.5 1.5 M10.5 8l1.5 1.5-1.5 1.5"/></svg><span class="lbl">Projects</span></a>
+      <a data-view="context" title="Context"><svg viewBox="0 0 16 16"><circle cx="3.5" cy="4" r="1.8"/><circle cx="12.5" cy="4" r="1.8"/><circle cx="8" cy="12" r="1.8"/><path d="M5.3 4h5.4M4.5 5.6l2.6 4.8M11.5 5.6l-2.6 4.8"/></svg><span class="lbl">Context</span></a>
       <a data-view="api" title="API"><svg viewBox="0 0 16 16"><path d="M2 5h12M2 11h12M5 2.5L3 5l2 2.5M11 8.5l2 2.5-2 2.5"/></svg><span class="lbl">API</span></a>
       <a data-view="models" title="Models"><svg viewBox="0 0 16 16"><path d="M8 1.5l6 3.5v6l-6 3.5-6-3.5V5z M2 5l6 3.5L14 5 M8 8.5V14.5"/></svg><span class="lbl">Models</span></a>
       <a data-view="library" title="Library"><svg viewBox="0 0 16 16"><path d="M3 1.5h8v11H3z M5 4.5h4 M5 7h4 M13 4v10.5H5"/></svg><span class="lbl">Library</span></a>
@@ -37,6 +38,7 @@
         <div class="tools">
           <button class="btn chip" id="webBtn" title="Let the model search and read web pages (read-only sandbox)">Web · off</button>
           <button class="btn chip" id="projBtn" title="Let the model read and change one of your code projects">Project · none</button>
+          <button class="btn chip" id="ctxBtn" title="Let the model read your synced pull requests, Jira issues and email (read-only, offline)">Context · off</button>
           <button class="btn chip" id="agentBtn" title="Let the model drive a real browser window: open pages, click, type">Browser · off</button>
           <button class="btn" id="libBtn">Library</button>
           <button class="btn" id="paramsBtn">Parameters</button>
@@ -182,6 +184,23 @@
           <div class="tabstrip" id="apiTabs"></div>
           <div class="api-editor" id="apiEditor"></div>
         </div>
+      </div>
+    </section>
+
+    <!-- Context -->
+    <section class="view" id="view-context" hidden>
+      <header class="head">
+        <h1>Context</h1>
+        <div class="tools">
+          <input id="ctxFilter" type="search" placeholder="Filter (ABC-123, a name, words…)" spellcheck="false">
+          <label class="check"><input type="checkbox" id="ctxLoose"> Unlinked</label>
+          <button class="btn primary" id="ctxSync"><i data-icon="refresh"></i>Sync</button>
+        </div>
+      </header>
+      <div class="ctx-status faint small" id="ctxStatus"></div>
+      <div class="ctx-body">
+        <div class="ctx-board" id="ctxBoard"></div>
+        <aside class="ctx-detail" id="ctxDetail" hidden></aside>
       </div>
     </section>
 
@@ -340,6 +359,35 @@
           <label>Browser program (leave empty to find Chrome, Edge or Chromium automatically)<input id="agentChrome" placeholder="C:\Program Files\Google\Chrome\Application\chrome.exe"></label>
           <div class="row"><button class="btn" id="agentOpen">Open the agent browser</button><span class="faint small" id="agentStatus"></span></div>
         </div>
+        <div class="panel" id="ctxSettings">
+          <h3>Work context</h3>
+          <p class="faint small">Pull requests from GitHub, issues from Jira and recent email, linked where they mention each other, on the <b>Context</b> page. Turn on <b>Context</b> in a chat to let the model read them. Everything is read-only (nothing is changed in GitHub or Jira, email isn't marked as read) and the synced copy stays on this computer. Tokens and passwords are saved in the app's settings file, like server API keys.</p>
+          <h4>GitHub</h4>
+          <div class="grid2" data-ctx-group>
+            <label class="full">Repositories (owner/repo, one per line or comma-separated)<textarea data-ctx="gh_repos" rows="2" spellcheck="false" placeholder="acme/payments-api"></textarea></label>
+            <label>Personal access token (read-only is enough; optional for public repos)<input data-ctx="gh_token" type="password" autocomplete="off"></label>
+            <label>API URL (change for GitHub Enterprise)<input data-ctx="gh_api" spellcheck="false" placeholder="https://api.github.com"></label>
+            <label>Pull requests per repository<input data-ctx="gh_limit" inputmode="numeric"></label>
+          </div>
+          <h4>Jira</h4>
+          <div class="grid2">
+            <label class="full">Site URL<input data-ctx="jira_url" spellcheck="false" placeholder="https://yourcompany.atlassian.net"></label>
+            <label>Email (Jira Cloud; leave empty for Jira Server / Data Center)<input data-ctx="jira_email" spellcheck="false"></label>
+            <label>API token (Cloud) or personal access token (Server)<input data-ctx="jira_token" type="password" autocomplete="off"></label>
+            <label>Only these project keys (optional, e.g. ABC, PAY)<input data-ctx="jira_projects" spellcheck="false"></label>
+            <label>Also load issues matching JQL (optional)<input data-ctx="jira_jql" spellcheck="false" placeholder="assignee = currentUser() AND updated >= -14d"></label>
+          </div>
+          <h4>Email (IMAP)</h4>
+          <div class="grid2">
+            <label>IMAP server<input data-ctx="mail_host" spellcheck="false" placeholder="outlook.office365.com"></label>
+            <label>Port<input data-ctx="mail_port" inputmode="numeric"></label>
+            <label>Username<input data-ctx="mail_user" spellcheck="false" autocomplete="off"></label>
+            <label>App password<input data-ctx="mail_password" type="password" autocomplete="off"></label>
+            <label>Folder<input data-ctx="mail_folder" spellcheck="false"></label>
+            <label>Days back · most messages<span class="row tight"><input data-ctx="mail_days" inputmode="numeric"><input data-ctx="mail_limit" inputmode="numeric"></span></label>
+          </div>
+          <div class="row"><button class="btn primary" id="ctxSave">Save</button><button class="btn" id="ctxSaveSync">Save and sync</button><span class="faint small" id="ctxSaved"></span></div>
+        </div>
         <div class="panel">
           <h3>Servers</h3>
           <div id="connList"></div>
@@ -378,6 +426,7 @@
 <script src="/static/markdown.js"></script>
 <script src="/static/vault.js"></script>
 <script src="/static/projects.js"></script>
+<script src="/static/contextview.js"></script>
 <script src="/static/apiview.js"></script>
 <script src="/static/app.js"></script>
 </body>

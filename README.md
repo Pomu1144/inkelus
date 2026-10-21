@@ -72,6 +72,9 @@ on the start page. **Blue dark**, **Light** and **Match system** are in
   with reports, OpenAPI / Postman / curl import, WebSocket and SSE. It also
   runs your dev server and checks the endpoints in your code against the
   docs. See [API](#api) below.
+- **Context**: your GitHub pull requests, Jira issues and email in one
+  diagram, linked where they mention each other, and readable by the model.
+  See [Context](#context) below.
 - **Library**: a place to keep **documents** (reference material the AI
   can read) and **templates** (examples of how answers should be laid out).
   See [Library](#library) below.
@@ -192,6 +195,50 @@ its files stay where they are.
 Coding works best with a model that's good at tool calling, such as
 `qwen2.5-coder:14b`, `qwen3:14b` or larger. Small models (7–8B) manage
 simple fixes but often lose track in multi-step changes.
+
+## Context
+
+The **Context** page shows your GitHub pull requests, Jira issues and email
+together, with lines between the items that mention each other, and lets the
+model read the same data.
+
+**Set it up** in **Settings › Work context**, then press **Sync**:
+
+- **GitHub**: the repositories (`owner/repo`) and a personal access token
+  (read-only is enough; public repos don't need one). Change the API URL
+  for GitHub Enterprise.
+- **Jira**: your site URL. For Jira Cloud, your login email and an API
+  token; for Jira Server / Data Center, leave the email empty and use a
+  personal access token. Optionally limit which project keys count, and
+  add a JQL query for extra issues (e.g. `assignee = currentUser()`).
+- **Email**: any IMAP account (server, username and an app password), a
+  folder, and how many days back to read.
+
+**How items are linked.** A sync reads recent pull requests, recent email,
+and every Jira issue mentioned in them. Items are joined when one mentions
+another: a Jira key like `ABC-123` in a PR's title, branch or description, a
+PR link or `owner/repo#12` in an email or issue, or a Jira key in an email.
+Key-shaped words like `UTF-8` are ignored, and so is quoted text in replies.
+Linked items form a **thread**.
+
+**The diagram** has one band per thread, with Jira, pull request and email
+columns and lines between linked items (a dashed line joins an issue and an
+email directly). Hover an item to highlight its links; click it for its
+details, everything linked to it, **Open** (in GitHub or Jira) and **Ask
+about this**. Filter by words, and tick **Unlinked** to see items that don't
+mention anything else. Problems from a sync (a wrong token, a missing repo)
+show in the status line; click it for details.
+
+**Asking the model.** Turn on **Context** in a chat's header, or press **Ask
+about this** on an item. The model can list the threads, search everything,
+and read any item with what it's linked to, so it can answer questions like
+"what's the status of ABC-101 and what did people say about the fix?"
+
+Everything is **read-only**: nothing is changed in GitHub or Jira, and email
+isn't marked as read. Each sync is saved in the app's data folder
+(`context.json`), so the diagram works offline, and the model reads that
+saved copy without going online. Tokens and passwords are kept in
+`settings.json` (like server API keys) and never sent to the page.
 
 ## API
 
@@ -521,6 +568,8 @@ vscode_assistant/static/vault.js   the encrypted password vault (Web Crypto, in 
 vscode_assistant/static/projects.js  the Projects workspace (files, editor, Git, terminal)
 vscode_assistant/engine.py         the chat + tool loop
 vscode_assistant/projects.py       projects: file access, the AI's coding tools, commands, undo
+vscode_assistant/context.py        work context: GitHub, Jira and IMAP sync, linking, the model's tools
+vscode_assistant/static/contextview.js  the Context page
 vscode_assistant/api.py            API collections, variables, auth, sending, import/export, code snippets
 vscode_assistant/apirun.py         the collection runner, its reports, and the command-line runner
 vscode_assistant/realtime.py       WebSocket and SSE connections for the API screen

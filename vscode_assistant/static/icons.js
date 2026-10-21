@@ -35,6 +35,8 @@
     ruler: '<path d="M2 11.5L11.5 2l2.5 2.5L4.5 14z M5 9.5l1.2 1.2M7 7.5l1.6 1.6M9 5.5l1.2 1.2"/>',
     trash: '<path d="M3 4.5h10M6.5 4.5v-2h3v2M4.5 4.5l.7 9h5.6l.7-9"/>',
     copy: '<path d="M5.5 5.5h7v8h-7z M3.5 10.5v-8h7"/>',
+    external: '<path d="M9 2.5h4.5V7M13.5 2.5L7.5 8.5M11.5 9.5v4H2.5v-9h4"/>',
+    link: '<path d="M6.8 9.2l2.4-2.4M7.5 4.6l1.2-1.2a2.6 2.6 0 0 1 3.7 3.7l-1.2 1.2M8.5 11.4l-1.2 1.2a2.6 2.6 0 0 1-3.7-3.7l1.2-1.2"/>',
   };
   window.icon = function (name, cls) {
     return '<svg class="i' + (cls ? " " + cls : "") + '" viewBox="0 0 16 16" aria-hidden="true">' + (P[name] || "") + "</svg>";
