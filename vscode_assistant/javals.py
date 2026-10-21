@@ -407,7 +407,9 @@ SEVERITY = {1: "error", 2: "warning", 3: "info", 4: "hint"}
 
 
 class Server:
-    """The language server for one project."""
+    """The language server for one project. Subclasses (tsls.py) run other languages' servers the same way."""
+    LANG, LABEL = "java", "Java"
+    PAGE_METHODS, PAGE_COMMANDS, WATCH = PAGE_METHODS, PAGE_COMMANDS, WATCH
 
     def __init__(self, tools, project_id, root, work_dir, publish):
         self.tools, self.id, self.root = tools, project_id, os.path.realpath(root)
@@ -461,10 +463,8 @@ class Server:
         if self.state != "stopped":
             self._set("error", "The Java language server stopped (exit code %s). %s" % (code, " ".join(self.stderr_tail[-3:])[:400]))
 
-    def _initialize(self):
-        bundles = [self.tools.debug_jar()] if os.path.isfile(self.tools.debug_jar()) else []
-        root_uri = file_uri(self.root)
-        caps = {
+    def capabilities(self):
+        return {
             "workspace": {"applyEdit": True, "workspaceEdit": {"documentChanges": True, "resourceOperations": ["create", "rename", "delete"]},
                           "configuration": True, "didChangeConfiguration": {"dynamicRegistration": True},
                           "didChangeWatchedFiles": {"dynamicRegistration": True}, "executeCommand": {"dynamicRegistration": True},
@@ -490,6 +490,11 @@ class Server:
             },
             "window": {"workDoneProgress": True, "showMessage": {}},
         }
+
+    def _initialize(self):
+        bundles = [self.tools.debug_jar()] if os.path.isfile(self.tools.debug_jar()) else []
+        root_uri = file_uri(self.root)
+        caps = self.capabilities()
         init_opts = {
             "bundles": bundles, "workspaceFolders": [root_uri], "settings": self.settings,
             "extendedClientCapabilities": {"classFileContentsSupport": True, "progressReportProvider": True,
@@ -537,7 +542,7 @@ class Server:
 
     def _set(self, state, message):
         self.state, self.message = state, message
-        self.publish({"type": "java", "project": self.id, "kind": "status", "state": state, "message": message})
+        self.publish({"type": "java", "lang": self.LANG, "project": self.id, "kind": "status", "state": state, "message": message})
 
     # -- what the server tells us --
     def _notify(self, method, params):
@@ -549,7 +554,7 @@ class Server:
                 self.diagnostics[uri] = items
             else:
                 self.diagnostics.pop(uri, None)
-            self.publish({"type": "java", "project": self.id, "kind": "diagnostics", "uri": uri, "items": items})
+            self.publish({"type": "java", "lang": self.LANG, "project": self.id, "kind": "diagnostics", "uri": uri, "items": items})
         elif method == "language/status":
             t, msg = params.get("type"), params.get("message") or ""
             if t == "ServiceReady":
@@ -562,17 +567,17 @@ class Server:
                     self._set("importing", msg[:160])
         elif method == "language/progressReport":
             if self.state != "error":
-                self.publish({"type": "java", "project": self.id, "kind": "progress", "task": params.get("task") or "",
+                self.publish({"type": "java", "lang": self.LANG, "project": self.id, "kind": "progress", "task": params.get("task") or "",
                               "sub": params.get("subTask") or "", "done": bool(params.get("complete")),
                               "work": params.get("workDone"), "total": params.get("totalWork")})
         elif method in ("window/showMessage", "language/actionableNotification"):
             if (params.get("type") or 3) <= 2:
-                self.publish({"type": "java", "project": self.id, "kind": "message", "level": params.get("severity") or params.get("type"),
+                self.publish({"type": "java", "lang": self.LANG, "project": self.id, "kind": "message", "level": params.get("severity") or params.get("type"),
                               "message": params.get("message") or ""})
         elif method == "$/progress":
             v = params.get("value") or {}
             if v.get("kind") in ("begin", "report") and self.state != "ready":
-                self.publish({"type": "java", "project": self.id, "kind": "progress", "task": v.get("title") or "", "sub": v.get("message") or "",
+                self.publish({"type": "java", "lang": self.LANG, "project": self.id, "kind": "progress", "task": v.get("title") or "", "sub": v.get("message") or "",
                               "done": False, "work": v.get("percentage"), "total": 100 if v.get("percentage") is not None else None})
 
     def _server_request(self, method, params):
@@ -654,7 +659,7 @@ class Server:
                 os.remove(path)
                 done.append({"uri": uri, "deleted": True})
         if done:
-            self.publish({"type": "java", "project": self.id, "kind": "edits", "changes": done})
+            self.publish({"type": "java", "lang": self.LANG, "project": self.id, "kind": "edits", "changes": done})
         return done
 
     def _watch(self):
@@ -664,7 +669,7 @@ class Server:
             for dirpath, dirs, files in os.walk(self.root):
                 dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
                 for f in files:
-                    if WATCH.match(f):
+                    if self.WATCH.match(f):
                         p = os.path.join(dirpath, f)
                         try:
                             seen[p] = os.stat(p).st_mtime_ns
@@ -689,6 +694,9 @@ class Server:
                 except LspError:
                     return
 
+    def language_id(self, uri):
+        return "java"
+
     # -- what the page asks --
     def sync(self, action, uri, text=None, version=None):
         if self.state in ("stopped", "error") or not self.lsp:
@@ -704,7 +712,7 @@ class Server:
             if uri in self.open_docs:    # already open (another tab or an earlier page): start from this copy
                 self.lsp.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
             self.open_docs[uri] = version or 1
-            self.lsp.notify("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "java", "version": self.open_docs[uri], "text": text}})
+            self.lsp.notify("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": self.language_id(uri), "version": self.open_docs[uri], "text": text}})
         elif action == "change" and uri in self.open_docs:
             self.open_docs[uri] = max(self.open_docs[uri] + 1, version or 0)
             self.lsp.notify("textDocument/didChange", {"textDocument": {"uri": uri, "version": self.open_docs[uri]}, "contentChanges": [{"text": text}]})
@@ -715,12 +723,12 @@ class Server:
             self.lsp.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
 
     def call(self, method, params, timeout=30):
-        if method not in PAGE_METHODS:
+        if method not in self.PAGE_METHODS:
             raise LspError("Not allowed: %s" % method)
-        if method == "workspace/executeCommand" and (params or {}).get("command") not in PAGE_COMMANDS:
+        if method == "workspace/executeCommand" and (params or {}).get("command") not in self.PAGE_COMMANDS:
             raise LspError("Not allowed: %s" % (params or {}).get("command"))
         if not self.lsp or self.state in ("stopped", "error"):
-            raise LspError("The Java language server isn't running.")
+            raise LspError("The %s language server isn't running." % self.LABEL)
         doc = ((params or {}).get("textDocument") or {}).get("uri")
         if doc and not doc.startswith("jdt://") and not self.inside(doc):
             raise LspError("That file isn't in this project.")
@@ -737,7 +745,7 @@ class Server:
                 sev = SEVERITY.get(d.get("severity") or 1, "error")
                 if sev in counts:
                     counts[sev] += 1
-        return {"state": self.state, "message": self.message, "root_uri": file_uri(self.root), "counts": counts,
+        return {"lang": self.LANG, "state": self.state, "message": self.message, "root_uri": file_uri(self.root), "counts": counts,
                 "diagnostics": [{"uri": u, "items": i} for u, i in self.diagnostics.items()]}
 
 

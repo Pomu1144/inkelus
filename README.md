@@ -243,6 +243,37 @@ Drag the top edge of the bottom panel to make it taller.
   JUnit) from the IDE's settings that `nbproject/private` points to. Ant
   itself is found inside NetBeans too.
 
+## TypeScript, JavaScript and React
+
+TypeScript and JavaScript files (`.ts`, `.tsx`, `.js`, `.jsx`) get the same
+help as Java, from typescript-language-server: the TypeScript compiler's own
+language service, the one VS Code uses. It reads your `tsconfig.json` and
+`node_modules` and uses **your project's own TypeScript**, so the errors match
+what `tsc` and your build report.
+
+The first time you open a project with a `package.json`, press **Set up
+TypeScript support** in the bar under the editor: it installs the language
+servers once with npm into the app's data folder (about 30 MB). It needs
+Node.js 18 or newer; pick which Node in **Settings › TypeScript and
+JavaScript** if it isn't on the PATH.
+
+- **Errors as you type**, the same as `tsc`, and **ESLint** warnings from
+  your project's own ESLint and config, both on the **Problems** tab.
+- **Completion with auto-imports** (pick `cartTotal` and the `import` line
+  is added), hover for types and docs, parameter hints.
+- **Go to definition** (`F12`, `Ctrl+B`), into a library's type definitions
+  in `node_modules` too; **find usages** (`Alt+F7`); **go to type or
+  component** (`Ctrl+O`).
+- **Rename** (`Ctrl+R`) across files, **organize imports**
+  (`Ctrl+Shift+I`), and **quick fixes** (`Alt+Enter`): add a missing import,
+  remove an unused variable, ESLint's fixes and "disable this rule here".
+- **Format** (`Alt+Shift+F`) with your project's **Prettier** and its
+  config when it has Prettier, else TypeScript's formatter.
+- **Run test** links above Vitest and Jest tests (`it`, `test`, `describe`),
+  run in the Terminal and recorded on the Tests list.
+
+Debugging a React app in the browser is best done in Chrome's DevTools.
+
 ## API
 
 The **API** screen is a full API client, like Postman, built into the app.
@@ -559,7 +590,7 @@ tool calls.
 - `Ctrl+B` collapses or expands the sidebar (in the code editor it goes to a
   definition instead)
 - `Tab` / `Shift+Tab` indent and unindent in the Projects editor
-- Java: `Alt+Enter` quick fix, `Ctrl+B` go to definition, `Alt+F7` find
+- Java and TypeScript: `Alt+Enter` quick fix, `Ctrl+B` go to definition, `Alt+F7` find
   usages, `Ctrl+R` rename, `Ctrl+Shift+I` fix imports, `Ctrl+O` go to type,
   `Alt+Shift+F` format
 - Debugger: `F9` breakpoint, `F5` continue, `F8` step over, `F7` step into,
@@ -576,10 +607,11 @@ vscode_assistant/static/           the app's page, styles and scripts
 vscode_assistant/static/vault.js   the encrypted password vault (Web Crypto, in the page)
 vscode_assistant/static/projects.js  the Projects workspace (files, editor, Git, terminal)
 vscode_assistant/static/codeeditor.js  the code editor (Monaco, or a plain text box if it can't load)
-vscode_assistant/static/javaide.js the Java features and the debugger in the editor
+vscode_assistant/static/javaide.js the Java and TypeScript features, and the Java debugger, in the editor
 vscode_assistant/static/vendor/monaco/  the Monaco editor (MIT licence, see its LICENSE and ThirdPartyNotices.txt)
 vscode_assistant/javals.py         the Java tools: finds a JDK, downloads and runs the Eclipse Java language server
 vscode_assistant/javadebug.py      the Java debugger (talks to the java-debug plugin)
+vscode_assistant/tsls.py           TypeScript/JavaScript: typescript-language-server, ESLint, Prettier, Vitest/Jest
 vscode_assistant/engine.py         the chat + tool loop
 vscode_assistant/projects.py       projects: file access, the AI's coding tools, commands, undo
 vscode_assistant/api.py            API collections, variables, auth, sending, import/export, code snippets

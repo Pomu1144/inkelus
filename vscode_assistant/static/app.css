@@ -801,6 +801,8 @@ b.m { font: 700 10.5px var(--mono); min-width: 34px; color: var(--dim); }
 /* ── Java in Projects: status bar, bottom panel tabs, Problems, Usages, Outline, Go to type ── */
 .jbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 4px 10px; border-top: 1px solid var(--line); font-size: 12.5px;
   background: var(--panel); min-height: 30px; }
+.jbar .jseg { display: inline-flex; align-items: center; gap: 8px; }
+.jbar .jseg + .jseg { padding-left: 10px; border-left: 1px solid var(--line); }
 .jbar .jlogo { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; color: var(--dim); }
 .jbar .jok { color: var(--green); } .jbar .jerr, .linkish.jerr { color: var(--red); } .linkish.jwarn { color: #d7b45a; }
 .jbar .linkish { padding: 0; font-size: 12.5px; text-decoration: underline; }

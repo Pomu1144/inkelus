@@ -30,7 +30,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import agent_browser, api, apirun, engine, gitops, javadebug, javals, net, projects, providers, realtime, tasks, web
+from . import agent_browser, api, apirun, engine, gitops, javadebug, javals, net, projects, providers, realtime, tasks, tsls, web
 from .library import KINDS, Library
 from .store import Store, new_id
 
@@ -61,6 +61,7 @@ class Hub:
         self.api_reports = {}        # collection run reports, for downloading
         self.rt = realtime.Sessions(self.publish)   # open WebSocket / SSE connections
         self.java = javals.Java(self.store.dir, self.store.settings.setdefault("java", {}), self.publish)   # Java language servers
+        self.ts = tsls.TypeScript(self.store.dir, self.store.settings.setdefault("ts", {}), self.publish)   # TypeScript/JavaScript ones
         self.debug = {}             # project id -> javadebug.Session
         self.oauth_pending = {}      # OAuth state -> {"auth", "vals", "verifier", "redirect"}
         self.token = secrets.token_urlsafe(24)
@@ -635,6 +636,9 @@ class Handler(BaseHTTPRequestHandler):
                 h.java.tools.javas(refresh=True)
             if b["java"].get("memory") in ("1G", "2G", "4G"):
                 j["memory"] = b["java"]["memory"]
+        if isinstance(b.get("ts"), dict) and "node_path" in b["ts"]:
+            s.setdefault("ts", {})["node_path"] = str(b["ts"]["node_path"]).strip().strip('"')
+            h.ts.tools.node(refresh=True)
         if isinstance(b.get("defaults"), dict):
             for k in ("system", "keep_alive"):
                 if k in b["defaults"]:
@@ -754,13 +758,19 @@ class Handler(BaseHTTPRequestHandler):
         proj = h.projects.get(pid) if pid else None
         if pid and not proj:
             return self.fail(404, "That project was removed.")
+        stopped = lambda lang: {"lang": lang, "state": "stopped", "message": "", "root_uri": javals.file_uri(proj.root), "counts": {}, "diagnostics": []}
         if method == "GET":
-            out = {"tools": J.tools.status()}
+            out = {"tools": J.tools.status(), "ts": {"tools": h.ts.tools.status()}}
             if proj:
                 s = J.servers.get(pid)
                 out["is_java"] = J.is_java_project(proj.root)
-                out["server"] = s.info() if s else {"state": "stopped", "message": "", "root_uri": javals.file_uri(proj.root), "counts": {}, "diagnostics": []}
+                out["server"] = s.info() if s else stopped("java")
+                ts, lint = h.ts.servers.get(pid), h.ts.linters.get(pid)
+                out["ts"].update({"is_ts": h.ts.is_ts_project(proj.root), "server": ts.info() if ts else stopped("ts"),
+                                  "eslint": lint.info() if lint else stopped("eslint"), "uses_eslint": h.ts.uses_eslint(proj.root)})
             return self.ok(out)
+        if b.get("lang") in ("ts", "eslint"):
+            return self.api_ts(h, pid, proj, b)
         act = b.get("action")
         if act == "setup":
             J.tools.javas(refresh=True)
@@ -795,6 +805,41 @@ class Handler(BaseHTTPRequestHandler):
             if act == "debug":
                 return self.java_debug(h, pid, proj, s, b)
         except javals.LspError as e:
+            return self.fail(400, str(e))
+        return self.fail(400, "Unknown action")
+
+    def api_ts(self, h, pid, proj, b):
+        """The TypeScript and ESLint servers: the same actions as Java's, plus Prettier and Vitest/Jest commands."""
+        T, act, lang = h.ts, b.get("action"), b.get("lang")
+        if act == "setup":
+            T.tools.node(refresh=True)
+            T.tools.install()
+            return self.ok({"tools": T.tools.status()})
+        if not proj:
+            return self.fail(400, "Pick a project.")
+        try:
+            if act == "start":
+                return self.ok({"server": T.server(pid, proj.root).info()})
+            if act in ("stop", "restart"):
+                T.stop(pid)
+                return self.ok({"server": T.server(pid, proj.root).info()} if act == "restart" else {})
+            if act == "test":
+                cmd = T.test_command(proj.root, str(b.get("path") or ""), b.get("name") or None)
+                return self.ok({"command": cmd}) if cmd else self.fail(400, "This project has no Vitest or Jest to run tests with.")
+            if act == "prettier":
+                full = proj.resolve(str(b.get("path") or ""), allow_root=False)
+                return self.ok({"text": T.prettier(proj.root, proj.rel(full), str(b.get("text") or ""))})
+            s = T.for_lang(lang, pid)
+            if not s or s.state in ("stopped", "error"):
+                return self.fail(409, "The %s language server isn't running." % ("ESLint" if lang == "eslint" else "TypeScript"))
+            if act == "sync":
+                s.sync(b.get("op"), str(b.get("uri") or ""), b.get("text"), b.get("version"))
+                return self.ok()
+            if act == "call":
+                return self.ok({"result": s.call(str(b.get("method") or ""), b.get("params"), timeout=min(int(b.get("timeout") or 30), 120))})
+            if act == "apply":
+                return self.ok({"changed": s.apply_edit(b.get("edit") or {}, from_page=True)})
+        except (javals.LspError, projects.ToolError, subprocess.SubprocessError) as e:
             return self.fail(400, str(e))
         return self.fail(400, "Unknown action")
 
@@ -1668,6 +1713,7 @@ def serve(port=8765, open_page=True, app_window=True, idle_exit=True):
         for d in list(hub.debug.values()):
             d.control("stop")
         hub.java.stop_all()
+        hub.ts.stop_all()
         hub.rt.close_all()
         httpd.server_close()
 

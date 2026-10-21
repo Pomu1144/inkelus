@@ -982,12 +982,15 @@
     const jv = s.java || {};
     $("#javaHome").value = jv.java_home || "";
     $("#javaMem").value = jv.memory || "1G";
+    $("#nodePath").value = (s.ts || {}).node_path || "";
     showJavaStatus();
     renderConns();
   }
   function showJavaStatus() {
     api("GET", "java").then(r => {
       const t = r.tools;
+      const n = (r.ts || {}).tools || {};
+      $("#tsStatus").textContent = n.node ? "Uses Node " + n.node_version + " · " + n.node + (n.installed ? " · language servers installed" : " · the language servers install when you open a TypeScript project") : n.problem || "";
       $("#javaStatus").textContent = t.java ? "Uses Java " + t.java_version + " · " + t.java + (t.installed ? " · language server " + t.jdtls + " installed" : " · the language server downloads when you open a Java project")
         : t.problem;
     }).catch(() => {});
@@ -1297,6 +1300,7 @@
     $("#agentConfirm").onchange = guard(() => patchSettings({ agent: { confirm: $("#agentConfirm").value } }));
     $("#agentSteps").onchange = guard(() => patchSettings({ agent: { max_steps: parseInt($("#agentSteps").value, 10) || 25 } }));
     $("#javaHome").onchange = guard(async () => { await patchSettings({ java: { java_home: $("#javaHome").value } }); fillSettings(); toast("Saved. Restart the Java server from the editor's Java bar to use it."); });
+    $("#nodePath").onchange = guard(async () => { await patchSettings({ ts: { node_path: $("#nodePath").value } }); fillSettings(); });
     $("#javaMem").onchange = guard(async () => { await patchSettings({ java: { memory: $("#javaMem").value } }); toast("Saved. It applies the next time the Java server starts."); });
     $("#agentChrome").onchange = guard(async () => { await patchSettings({ agent: { chrome_path: $("#agentChrome").value } }); fillSettings(); });
     $("#agentOpen").onclick = guard(async () => {
