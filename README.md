@@ -79,8 +79,9 @@ on the start page. **Blue dark**, **Light** and **Match system** are in
 - **Library**: a place to keep **documents** (reference material the AI
   can read) and **templates** (examples of how answers should be laid out).
   See [Library](#library) below.
-- **Multiple servers**: Ollama, plus OpenAI-compatible servers (LM Studio,
-  llama.cpp `llama-server`, vLLM, LocalAI, Jan…). Models from every server
+- **Multiple servers**: Ollama, OpenAI-compatible servers (LM Studio,
+  llama.cpp `llama-server`, vLLM, LocalAI, Jan…), and **Amazon Bedrock**
+  (Claude through your company's AWS account and SSO sign-in). Models from every server
   appear in one picker under **Settings › Model**.
 
 ## Sidebar and the + menu
@@ -673,6 +674,37 @@ Pull, delete, load/unload and the "In memory" list need Ollama's native API.
 OpenAI-compatible servers support listing models and chatting, including
 tool calls.
 
+### Amazon Bedrock (Claude through your company's AWS account)
+
+Choose **Amazon Bedrock (AWS)** as the type to use Claude (or any other
+Bedrock model) everywhere a local model works: chats, Projects, the agent
+browser and Context. Replies stream in, and tool calls work.
+
+It signs in the same way the AWS CLI does, so nothing is pasted into the app:
+
+- **With the AWS CLI and an SSO profile** (you run `aws sso login`): pick the
+  profile under **AWS profile** (the list shows your profiles; an SSO one is
+  picked for you) and set the **Region**, e.g. `us-east-1`. The app uses the
+  sign-in the AWS CLI saved and renews it when it can. When it runs out,
+  run `aws sso login --profile <name>` again, or press **Sign in**.
+- **Without the AWS CLI**: open *No AWS CLI profile?* and fill in your SSO
+  start URL (your AWS access portal's address), its region, the account ID
+  and the role name (both shown on the portal). Save, then press **Sign in**:
+  your browser opens AWS's sign-in page with a code to confirm, the same as
+  `aws sso login`. The sign-in is kept in the app's data folder.
+- A profile with `credential_process` or keys in `~/.aws/credentials`, and
+  the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` environment variables,
+  work too.
+
+**Test** shows who you're signed in as and how many models you can use.
+Models are listed from Bedrock's inference profiles (newer Claude models
+are called through one, e.g. `us.anthropic.claude-…`) and on-demand models,
+with Claude first. If your role isn't allowed to list them, type the model
+IDs into **Models**. Your role needs `bedrock:InvokeModel` and
+`bedrock:InvokeModelWithResponseStream` on the model, and the model must be
+enabled for the account (Bedrock › Model access); the error says which one
+is missing.
+
 ## Work laptops
 
 - **Nothing to install** beyond Python and a browser (Chrome or Edge is best).
@@ -730,6 +762,7 @@ vscode_assistant/static/pmsandbox.js  the sandbox that runs pm.* scripts
 vscode_assistant/testlog.py        the Tests list: test runs, their results, and suggested tests
 vscode_assistant/gitops.py         Git commands (status, diff, commit, pull, push, branches)
 vscode_assistant/providers.py      Ollama + OpenAI-compatible clients (streaming, tool calls)
+vscode_assistant/bedrock.py        Amazon Bedrock: AWS sign-in (SSO, profiles), model list, Converse streaming
 vscode_assistant/web.py            the sandbox browser (read-only web tools)
 vscode_assistant/agent_browser.py  the agent browser: drives a Chrome window over DevTools
 vscode_assistant/library.py        documents + templates, and the prompt text they add

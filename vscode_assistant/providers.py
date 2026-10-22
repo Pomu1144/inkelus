@@ -3,6 +3,7 @@
 ollama  native API: list / running / show / pull / delete / load / unload / chat
 openai  any OpenAI-compatible server (LM Studio, llama.cpp server, vLLM,
         LocalAI, Jan…): list models and chat
+bedrock Amazon Bedrock with your AWS sign-in (bedrock.py): list models and chat
 
 Both support tool calling, which is how the sandbox web tools reach the model.
 
@@ -263,4 +264,7 @@ class OpenAICompat(Base):
 
 
 def create(conn):
+    if conn.get("type") == "bedrock":
+        from .bedrock import Bedrock          # imported here: bedrock.py builds on this module
+        return Bedrock(conn)
     return OpenAICompat(conn) if conn.get("type") == "openai" else Ollama(conn)

@@ -30,7 +30,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import agent_browser, api, apirun, context, engine, gitops, javadebug, javals, net, projects, providers, realtime, tasks, tsls, web
+from . import agent_browser, api, apirun, bedrock, context, engine, gitops, javadebug, javals, net, projects, providers, realtime, tasks, tsls, web
 from .library import KINDS, Library
 from .store import Store, new_id
 
@@ -45,6 +45,9 @@ IDLE_EXIT = 30   # seconds with no open app window before the server stops
 
 class Hub:
     """App state shared by all request threads, plus the event fan-out."""
+
+    def sso_login(self, sso, on_done):
+        return bedrock.Sso(self.store.dir).login(sso, on_done)
 
     def __init__(self):
         self.store = Store()
@@ -61,6 +64,7 @@ class Hub:
         self.api_reports = {}        # collection run reports, for downloading
         self.rt = realtime.Sessions(self.publish)   # open WebSocket / SSE connections
         self.java = javals.Java(self.store.dir, self.store.settings.setdefault("java", {}), self.publish)   # Java language servers
+        bedrock.Bedrock.data_dir = self.store.dir                                                    # the app's own AWS SSO sign-ins
         self.ts = tsls.TypeScript(self.store.dir, self.store.settings.setdefault("ts", {}), self.publish)   # TypeScript/JavaScript ones
         self.debug = {}             # project id -> javadebug.Session
         self.oauth_pending = {}      # OAuth state -> {"auth", "vals", "verifier", "redirect"}
@@ -702,10 +706,35 @@ class Handler(BaseHTTPRequestHandler):
     def api_connections(self, method, parts, query):
         h = self.hub
         s = h.store.settings
+        if method == "GET" and parts == ["aws-profiles"]:
+            return self.ok({"profiles": bedrock.profiles()})
+        if method == "POST" and parts == ["sso-login"]:      # sign in to AWS SSO in the browser, like `aws sso login`
+            b = self.body()
+            cn = h.store.conn(b.get("id"))
+            if not cn or cn.get("type") != "bedrock":
+                return self.fail(404, "No such Bedrock server.")
+            sso = bedrock.sso_settings(cn)
+            if not sso:
+                return self.fail(400, "This server has no SSO profile or SSO start URL to sign in to.")
+
+            def done(err, cid=cn["id"]):
+                bedrock.Credentials(cn, h.store.dir).forget()
+                h.publish({"type": "aws_sso", "conn": cid, "ok": not err, "error": err or ""})
+            try:
+                r = h.sso_login(sso, done)
+            except (net.HTTPError, ConnectionError) as e:
+                return self.fail(400, "AWS SSO: %s" % e)
+            webbrowser.open(r["url"])
+            return self.ok(r)
         if method == "POST":  # add or update
             b = self.body()
-            data = {"name": (b.get("name") or "").strip(), "url": (b.get("url") or "").strip().rstrip("/"),
-                    "type": "openai" if b.get("type") == "openai" else "ollama"}
+            kind = b.get("type") if b.get("type") in ("openai", "bedrock") else "ollama"
+            data = {"name": (b.get("name") or "").strip(), "url": (b.get("url") or "").strip().rstrip("/"), "type": kind}
+            if kind == "bedrock":
+                for k in ("region", "profile", "start_url", "sso_region", "account_id", "role_name", "models"):
+                    data[k] = str(b.get(k) or "").strip()
+                data["region"] = data["region"] or "us-east-1"
+                data["url"] = bedrock.ENDPOINTS["runtime"].format(region=data["region"])
             if not data["name"]:
                 return self.fail(400, "Give the server a name.")
             if not data["url"].startswith(("http://", "https://")):
