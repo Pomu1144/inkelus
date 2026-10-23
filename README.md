@@ -92,7 +92,7 @@ on the start page. **Blue dark**, **Light** and **Match system** are in
 - **New chat** opens a blank conversation. It's only saved once you send a
   message, so empty chats don't pile up.
 - The **+** in the message box opens a menu: **Upload images** (for vision
-  models), **Upload documents** (text, Markdown, code or Word; they're added
+  models), **Upload documents** (text, Markdown, code, PDF or Word; they're added
   to *Library › Documents* and the AI reads them in this chat), **Library
   documents and templates**, and **Work on a project**.
 
@@ -482,14 +482,39 @@ Open **Library** in the left rail. It has three tabs:
 
 - **Documents**: notes, specs, policies, code, anything the AI should know
   about. Create them in the editor, or click **Import…** to add text files
-  (`.txt`, `.md`, `.csv`, `.json`, source code…) or Word `.docx` files, which
-  are converted to text.
+  (`.txt`, `.md`, `.csv`, `.json`, source code…), **PDFs** or **Word** files
+  (`.docx` and the older `.doc`), which are converted to text. See
+  [PDF and Word files](#pdf-and-word-files).
 - **Templates**: examples of how an answer should look. Write them with
   headings, tables and `{{placeholders}}`; the AI copies the layout and fills
   in the blanks. Three examples come with the app: meeting notes, a bug
   report and an email.
 - **Doc standards**: your documentation templates, which the AI **must**
   follow whenever it writes documentation. See below.
+
+### PDF and Word files
+
+PDFs, Word `.docx` and old Word `.doc` files are read by the app itself
+(standard library only, nothing to install), so they work with **every**
+model: local ones on Ollama, OpenAI-compatible servers and Bedrock alike.
+
+- **Where:** **+ › Upload documents** in a chat, **Library › Import…**,
+  documentation standards, files the AI reads in a **Project** (read-only:
+  it can't edit them), and PDF or Word links the **web sandbox** opens.
+- **What comes out:** the text page by page (`[Page 2]`), with words, lines
+  and table rows kept together; Word headings, lists and tables are marked
+  up. Compressed PDFs, PDFs with object streams, and PDFs that are only
+  locked against printing or copying (RC4 and AES) are read. A PDF that
+  needs a password to open is refused with a clear message.
+- **Scanned PDFs** are pictures of pages with no text in them. The app says
+  so instead of guessing (reading them needs OCR: save them with recognized
+  text from Acrobat or Word first). In a mixed PDF, the scanned pages are
+  listed and the rest is read.
+- **With a model on Amazon Bedrock**, the chat also sends the original PDF
+  (up to 5 files of 4.5 MB each), so the model sees the layout and tables
+  itself; the reply says "read … as PDF file". If Bedrock turns the file
+  down, the app sends the extracted text instead, automatically, and says
+  so under the reply. Reading PDFs never depends on Bedrock.
 
 In a chat, click **Library** in the header to choose:
 
@@ -762,6 +787,7 @@ vscode_assistant/static/pmsandbox.js  the sandbox that runs pm.* scripts
 vscode_assistant/testlog.py        the Tests list: test runs, their results, and suggested tests
 vscode_assistant/gitops.py         Git commands (status, diff, commit, pull, push, branches)
 vscode_assistant/providers.py      Ollama + OpenAI-compatible clients (streaming, tool calls)
+vscode_assistant/docread.py        PDF, Word .docx and .doc reading (text, tables, encrypted PDFs)
 vscode_assistant/bedrock.py        Amazon Bedrock: AWS sign-in (SSO, profiles), model list, Converse streaming
 vscode_assistant/web.py            the sandbox browser (read-only web tools)
 vscode_assistant/agent_browser.py  the agent browser: drives a Chrome window over DevTools

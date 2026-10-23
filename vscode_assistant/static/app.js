@@ -330,6 +330,7 @@
     if (st.tokens) p.push((st.approx ? "~" : "") + st.tokens + " tokens");
     if (st.tps) p.push(st.tps.toFixed(1) + " tok/s");
     if (st.seconds) p.push(st.seconds.toFixed(1) + "s");
+    if (st.note) p.push(st.note);
     return p.join(" · ");
   }
 
@@ -867,14 +868,14 @@
 
   // ── Library view ─────────────────────────────────────────────────────
   const LIB_HINTS = {
-    documents: "Reference material the AI can read: notes, specs, policies, code. Choose which documents a chat uses with the Library button in the chat header.",
+    documents: "Reference material the AI can read: notes, specs, policies, code, PDFs and Word files (imported as text). Choose which documents a chat uses with the Library button in the chat header.",
     templates: "Examples of how answers should look. Use headings, tables and {{placeholders}}; the AI copies the layout and fills in the blanks. In Auto mode (the default) it sees every template and picks the one that fits the request.",
-    standards: "Documentation standards the AI must follow whenever it writes documentation, in every chat: same sections, headings and order. Upload your company's templates (Markdown, text or Word) with Import. In a project, a doc file that matches the file patterns is checked: if the AI leaves out a required section, the change is refused and it has to fix it.",
+    standards: "Documentation standards the AI must follow whenever it writes documentation, in every chat: same sections, headings and order. Upload your company's templates (Markdown, text, PDF or Word) with Import. In a project, a doc file that matches the file patterns is checked: if the AI leaves out a required section, the change is refused and it has to fix it.",
   };
   const LIB_EMPTY = {
     documents: ["art_library", "No documents yet. Add reference material with New or Import, or upload one from the + menu in a chat."],
     templates: ["art_library", "No templates yet. Add an example answer layout with New or Import."],
-    standards: ["art_standards", "No documentation standards yet. Import your team's README, API or runbook templates (Markdown, text or Word), or write one with New."],
+    standards: ["art_standards", "No documentation standards yet. Import your team's README, API or runbook templates (Markdown, text, PDF or Word), or write one with New."],
   };
 
   async function loadLibrary(select) {

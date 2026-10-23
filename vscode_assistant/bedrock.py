@@ -13,6 +13,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import struct
 import subprocess
 import threading
@@ -476,6 +477,17 @@ class Bedrock(Base):
 
     def chat(self, model, messages, params, on_delta, cancel, tools=None, keep_alive=None):
         system, msgs = self._wire(messages)
+        docs = params.get("documents") or []
+        if docs and msgs:                 # PDF files the model reads itself: with the first thing the person said
+            used, blocks = set(), []
+            for d in docs:
+                name = re.sub(r"\s+", " ", re.sub(r"[^A-Za-z0-9\s\-()\[\]]", " ", os.path.splitext(d["name"])[0])).strip() or "Document"
+                base, n = name[:180], 2
+                while name in used:
+                    name, n = "%s (%d)" % (base, n), n + 1
+                used.add(name)
+                blocks.append({"document": {"format": "pdf", "name": name, "source": {"bytes": base64.b64encode(d["data"]).decode()}}})
+            msgs[0]["content"] = blocks + msgs[0]["content"]
         body = {"messages": msgs, "inferenceConfig": {"maxTokens": int(params.get("max_tokens") or 8192)}}
         if system:
             body["system"] = system

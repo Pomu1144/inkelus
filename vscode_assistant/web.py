@@ -23,6 +23,8 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
+from . import docread
+
 MAX_BYTES = 3 * 1024 * 1024
 PAGE_CHARS = 8000
 MAX_LINKS = 40
@@ -222,6 +224,16 @@ class Sandbox:
             raise RuntimeError("Couldn't open %s (%s)" % (url, e.reason)) from None
         with r:
             ctype = (r.headers.get("Content-Type") or "text/html").lower()
+            path = urllib.parse.urlsplit(r.geturl()).path.lower()
+            if ctype.startswith(("application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml")) \
+                    or (ctype.startswith("application/octet-stream") and path.endswith((".pdf", ".doc", ".docx"))):
+                raw = r.read(docread.MAX_BYTES + 1)      # a PDF or Word file: read its text
+                final = r.geturl()
+                try:
+                    text, info = docread.extract(path.rsplit("/", 1)[-1] or "file.pdf", raw)
+                except docread.DocError as e:
+                    raise RuntimeError("%s: %s" % (url, e)) from None
+                return final, "text/plain; document=" + info.get("kind", "pdf"), text
             if not ctype.startswith(TEXT_TYPES):
                 raise RuntimeError("%s is %s, not a text page; the sandbox only reads text." % (url, ctype.split(";")[0]))
             raw = r.read(MAX_BYTES + 1)

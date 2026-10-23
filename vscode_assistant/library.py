@@ -7,14 +7,16 @@ standards/   documentation standards: layouts the model MUST follow whenever it 
              standard's file patterns is checked: a missing required section stops the write.
 
 Everything is stored as UTF-8 text so it can be opened and edited outside the
-app too. Word files (.docx) are converted to text when imported.
+app too. PDF and Word files (.pdf, .docx, .doc) are converted to text when imported (docread.py);
+an imported PDF's original is kept too (documents/.originals/), so a model that reads PDF files
+itself (Bedrock) can be given the file as well as its text.
 """
 import fnmatch
 import json
 import os
 import re
-import zipfile
-from xml.etree import ElementTree
+
+from . import docread
 
 KINDS = ("documents", "templates", "standards")
 STANDARDS_TOTAL = 16000             # chars of documentation standards in every chat
@@ -22,11 +24,13 @@ RULES = ".rules.json"               # per-standard settings, next to the standar
 MAX_IMPORT = 2 * 1024 * 1024        # bytes read from an imported file
 DOC_LIMIT = 24000                   # chars of one document sent to the model
 DOCS_TOTAL = 60000                  # chars of all documents together
+ORIGINALS = ".originals"            # imported PDFs, next to their text: documents/.originals/<name>.pdf
+NATIVE_MAX = 4_500_000              # largest PDF handed to a model as a file (Bedrock's limit per document)
 TEMPLATES_TOTAL = 16000             # chars of templates in "auto" mode
 
 TEXT_TYPES = [("Text and documents", "*.txt *.md *.markdown *.csv *.tsv *.json *.xml *.html *.htm *.yaml *.yml "
                                      "*.ini *.cfg *.toml *.log *.py *.js *.ts *.java *.c *.cpp *.h *.cs *.go "
-                                     "*.rs *.rb *.php *.sql *.sh *.ps1 *.css *.docx"),
+                                     "*.rs *.rb *.php *.sql *.sh *.ps1 *.css *.docx *.doc *.pdf"),
               ("All files", "*.*")]
 
 SAMPLE_TEMPLATES = {
@@ -194,10 +198,27 @@ class Library:
         return os.path.basename(p)
 
     def delete(self, kind, name):
-        try:
-            os.remove(self.path(kind, name))
-        except OSError:
-            pass
+        for p in (self.path(kind, name), self.original(kind, name)):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    def original(self, kind, name):
+        """Where the original PDF of an imported document is kept (it may not exist)."""
+        return os.path.join(self.dir(kind), ORIGINALS, clean_name(name) + ".pdf")
+
+    def pdf_originals(self, docs):
+        """{document name: path} for the chosen documents that came from a PDF small enough to send as a file."""
+        out = {}
+        for d in docs or []:
+            p = self.original("documents", d)
+            try:
+                if 0 < os.path.getsize(p) <= NATIVE_MAX:
+                    out[d] = p
+            except OSError:
+                pass
+        return out
 
     def rename(self, kind, old, new):
         src, dst = self.path(kind, old), self.path(kind, new)
@@ -206,6 +227,8 @@ class Library:
         if os.path.exists(dst):
             raise ValueError("%s already exists." % os.path.basename(dst))
         os.replace(src, dst)
+        if os.path.exists(self.original(kind, old)):
+            os.replace(self.original(kind, old), self.original(kind, os.path.basename(dst)))
         if kind == "standards":
             self.set_meta(os.path.basename(dst), None, old=os.path.basename(src))
         return os.path.basename(dst)
@@ -213,8 +236,16 @@ class Library:
     def import_file(self, kind, src):
         """Copy a file into the library as text. Returns the stored name."""
         base = os.path.basename(src)
-        if base.lower().endswith(".docx"):
-            text = docx_text(src)
+        with open(src, "rb") as f:
+            head = f.read(8)
+        doc = docread.kind(base, head)
+        if doc:
+            try:
+                text, info = docread.extract_file(src)
+            except docread.DocError as e:
+                raise ValueError("%s: %s" % (base, e)) from None
+            if doc == "pdf":
+                text = "Text of the PDF %s (%d page%s).\n\n%s" % (base, info["pages"], "" if info["pages"] == 1 else "s", text)
             base = os.path.splitext(base)[0] + ".md"
         else:
             with open(src, "rb") as f:
@@ -226,14 +257,20 @@ class Library:
         while os.path.exists(self.path(kind, name)):
             stem, ext = os.path.splitext(base)
             name, n = "%s (%d)%s" % (stem, n, ext), n + 1
-        return self.save(kind, name, text)
+        stored = self.save(kind, name, text)
+        if doc == "pdf":                       # keep the PDF itself too, for models that read PDF files
+            os.makedirs(os.path.dirname(self.original(kind, stored)), exist_ok=True)
+            import shutil
+            shutil.copyfile(src, self.original(kind, stored))
+        return stored
 
     # ── What the model sees ─────────────────────────────────────────────
-    def context_prompt(self, docs, template):
+    def context_prompt(self, docs, template, as_files=()):
         """System-prompt text for the chosen documents and template.
 
         template: "" or None = no template, "auto" = every template (the model
-        picks the one that fits), otherwise one template's name."""
+        picks the one that fits), otherwise one template's name.
+        as_files: documents the model gets as the original PDF file instead of their text."""
         parts = []
         have = set(self.names("documents"))
         docs = [d for d in docs or [] if d in have]
@@ -241,6 +278,9 @@ class Library:
             budget = DOCS_TOTAL
             blocks = []
             for d in docs:
+                if d in as_files:
+                    blocks.append('<document name="%s">(attached as the original PDF file: read it there)</document>' % d)
+                    continue
                 text = self.read("documents", d).strip()
                 cut = min(DOC_LIMIT, max(budget, 0))
                 if len(text) > cut:
@@ -304,24 +344,9 @@ def clean_name(name):
 
 
 def docx_text(path):
-    """Plain text from a Word document, with headings and list items marked up lightly."""
-    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-    with zipfile.ZipFile(path) as z:
-        root = ElementTree.fromstring(z.read("word/document.xml"))
-    out = []
-    for p in root.iter(ns + "p"):
-        text = "".join(t.text or "" for t in p.iter(ns + "t"))
-        style = p.find("%spPr/%spStyle" % (ns, ns))
-        style = style.get(ns + "val", "") if style is not None else ""
-        if p.find("%spPr/%snumPr" % (ns, ns)) is not None and text:
-            text = "- " + text
-        m = re.match(r"Heading(\d)", style)
-        if m and text:
-            text = "#" * int(m.group(1)) + " " + text
-        elif style == "Title" and text:
-            text = "# " + text
-        out.append(text)
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip() + "\n"
+    """Plain text from a Word document (kept for callers of the old name)."""
+    with open(path, "rb") as f:
+        return docread.docx_text(f.read())
 
 
 # ── checking a document against a standard ──────────────────────────────
