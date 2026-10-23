@@ -198,15 +198,21 @@ class Library:
         return os.path.basename(p)
 
     def delete(self, kind, name):
-        for p in (self.path(kind, name), self.original(kind, name)):
+        for p in (self.path(kind, name), self.original(kind, name), self.original(kind, name, "docx")):
             try:
                 os.remove(p)
             except OSError:
                 pass
 
-    def original(self, kind, name):
-        """Where the original PDF of an imported document is kept (it may not exist)."""
-        return os.path.join(self.dir(kind), ORIGINALS, clean_name(name) + ".pdf")
+    def original(self, kind, name, ext="pdf"):
+        """Where the original file of an imported document or template is kept (it may not exist): a PDF for
+        documents, the Word file for Word templates."""
+        return os.path.join(self.dir(kind), ORIGINALS, clean_name(name) + "." + ext)
+
+    def word_templates(self, template="auto"):
+        """{template name: path of its .docx} for the Word templates a chat can fill in."""
+        names = self.names("templates") if template == "auto" else [template] if template else []
+        return {n: self.original("templates", n, "docx") for n in names if os.path.isfile(self.original("templates", n, "docx"))}
 
     def pdf_originals(self, docs):
         """{document name: path} for the chosen documents that came from a PDF small enough to send as a file."""
@@ -227,8 +233,9 @@ class Library:
         if os.path.exists(dst):
             raise ValueError("%s already exists." % os.path.basename(dst))
         os.replace(src, dst)
-        if os.path.exists(self.original(kind, old)):
-            os.replace(self.original(kind, old), self.original(kind, os.path.basename(dst)))
+        for ext in ("pdf", "docx"):
+            if os.path.exists(self.original(kind, old, ext)):
+                os.replace(self.original(kind, old, ext), self.original(kind, os.path.basename(dst), ext))
         if kind == "standards":
             self.set_meta(os.path.basename(dst), None, old=os.path.basename(src))
         return os.path.basename(dst)
@@ -258,10 +265,11 @@ class Library:
             stem, ext = os.path.splitext(base)
             name, n = "%s (%d)%s" % (stem, n, ext), n + 1
         stored = self.save(kind, name, text)
-        if doc == "pdf":                       # keep the PDF itself too, for models that read PDF files
-            os.makedirs(os.path.dirname(self.original(kind, stored)), exist_ok=True)
+        keep = "pdf" if doc == "pdf" else "docx" if doc == "docx" and kind == "templates" else None
+        if keep:                               # the PDF for models that read PDFs; the Word file to fill in
             import shutil
-            shutil.copyfile(src, self.original(kind, stored))
+            os.makedirs(os.path.dirname(self.original(kind, stored, keep)), exist_ok=True)
+            shutil.copyfile(src, self.original(kind, stored, keep))
         return stored
 
     # ── What the model sees ─────────────────────────────────────────────
@@ -289,7 +297,18 @@ class Library:
                 blocks.append('<document name="%s">\n%s\n</document>' % (d, text))
             parts.append("The user has shared these reference documents. Use them when they're relevant, "
                          "quote them accurately, and say which document you used.\n\n" + "\n\n".join(blocks))
-        tnames = self.names("templates")
+        word = self.word_templates(template)
+        tnames = [t for t in self.names("templates") if t not in word]
+        if word:
+            from . import docxfill
+            blocks = []
+            for t, path in word.items():
+                try:
+                    with open(path, "rb") as f:
+                        blocks.append('<word_template name="%s">\n%s\n</word_template>' % (t, docxfill.outline(f.read())))
+                except (OSError, ValueError) as e:
+                    blocks.append('<word_template name="%s">(can\'t be read: %s)</word_template>' % (t, e))
+            parts.append(docxfill.PROMPT + "\n\n" + "\n\n".join(blocks))
         if template == "auto" and tnames:
             blocks, budget = [], TEMPLATES_TOTAL
             for t in tnames:
@@ -303,7 +322,7 @@ class Library:
                          "covers (judge by its name and content), lay your answer out exactly like that "
                          "template: same sections, headings, order and style, with the {{placeholders}} "
                          "filled in. If none fits, answer normally.\n\n" + "\n\n".join(blocks))
-        elif template and template in tnames:
+        elif template and template in tnames and template not in word:
             parts.append('Format your answer using this template: keep its sections, headings, order and '
                          'style, and fill in the {{placeholders}}. Don\'t add sections it doesn\'t have.\n\n'
                          '<template name="%s">\n%s\n</template>' % (template, self.read("templates", template).strip()))

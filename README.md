@@ -488,9 +488,31 @@ Open **Library** in the left rail. It has three tabs:
 - **Templates**: examples of how an answer should look. Write them with
   headings, tables and `{{placeholders}}`; the AI copies the layout and fills
   in the blanks. Three examples come with the app: meeting notes, a bug
-  report and an email.
+  report and an email. **Import a Word `.docx`** to make it a
+  [Word template](#word-templates) the AI fills in as a real Word file.
 - **Doc standards**: your documentation templates, which the AI **must**
   follow whenever it writes documentation. See below.
+
+### Word templates
+
+Company templates (task designs, test plans, design docs) usually have to
+come out as Word files that look exactly like the template: its tables,
+fonts, borders, header and footer. Import the template's **`.docx`** in
+**Library › Templates** (an old `.doc`: open it in Word and *Save As* `.docx`
+first). Then ask in any chat, e.g. *"Write the task design for LOAN-482"*.
+
+- The AI sees the template as an outline: its paragraphs and its tables
+  with their header rows and example rows. It fills it in with the real
+  content: replaces instructions and italic examples, adds paragraphs and
+  code snippets, and writes the table rows (several lines in a cell are
+  fine).
+- The app makes a **copy of your `.docx`** with those changes. New table
+  rows are copies of the template's own row (borders, widths, shading,
+  fonts); new text uses the document's body font; the header, footer,
+  styles, pictures and everything not mentioned stay exactly as they were.
+- The chat shows **Download** with the new file. In a Project chat, the AI
+  can read the code and the Git changes first, so the Modified Files and
+  New Classes tables list the real files.
 
 ### PDF and Word files
 
@@ -503,7 +525,10 @@ model: local ones on Ollama, OpenAI-compatible servers and Bedrock alike.
   it can't edit them), and PDF or Word links the **web sandbox** opens.
 - **What comes out:** the text page by page (`[Page 2]`), with words, lines
   and table rows kept together; Word headings, lists and tables are marked
-  up. Compressed PDFs, PDFs with object streams, and PDFs that are only
+  up. Word tables keep every cell whole: a plain grid becomes a Markdown
+  table, and tables with several lines in a cell or merged cells become
+  HTML tables (`colspan`/`rowspan`, `<br>` for line breaks), so their shape
+  isn't lost. Compressed PDFs, PDFs with object streams, and PDFs that are only
   locked against printing or copying (RC4 and AES) are read. A PDF that
   needs a password to open is refused with a clear message.
 - **Scanned PDFs** are pictures of pages with no text in them. The app says
@@ -788,6 +813,7 @@ vscode_assistant/testlog.py        the Tests list: test runs, their results, and
 vscode_assistant/gitops.py         Git commands (status, diff, commit, pull, push, branches)
 vscode_assistant/providers.py      Ollama + OpenAI-compatible clients (streaming, tool calls)
 vscode_assistant/docread.py        PDF, Word .docx and .doc reading (text, tables, encrypted PDFs)
+vscode_assistant/docxfill.py       fills a Word template (.docx) and keeps its formatting
 vscode_assistant/bedrock.py        Amazon Bedrock: AWS sign-in (SSO, profiles), model list, Converse streaming
 vscode_assistant/web.py            the sandbox browser (read-only web tools)
 vscode_assistant/agent_browser.py  the agent browser: drives a Chrome window over DevTools
