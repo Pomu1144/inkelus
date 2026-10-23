@@ -119,8 +119,18 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
         if proj is not None:  # so do coding tasks: read, edit, test, fix
             steps = max(steps, 40)
             driving = True
-        lib_context = library.context_prompt(c.get("docs"), c.get("template", "auto")) if library else ""
         params = dict(c["params"])
+        # a model on Bedrock reads PDFs itself (tables, layout): give it the original files as well as the
+        # chat. Everyone else, and Bedrock if it turns a file down, gets the text the app took out of them.
+        as_files = {}
+        if library and conn["type"] == "bedrock" and not c.get("pdf_as_text"):
+            as_files = dict(list(library.pdf_originals(c.get("docs")).items())[:5])
+        if as_files:
+            params["documents"] = []
+            for d, path in as_files.items():
+                with open(path, "rb") as f:
+                    params["documents"].append({"name": d, "data": f.read()})
+        lib_context = library.context_prompt(c.get("docs"), c.get("template", "auto"), as_files) if library else ""
         if (lib_context or driving) and not params.get("num_ctx") and conn["type"] == "ollama":
             params["num_ctx"] = max(context_size(lib_context, c["messages"]), 16384 if driving else 0)
         for step in range(steps + 1):
@@ -149,9 +159,32 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
                     r["thinking"] += think
                 emit("delta")
 
-            calls, stats = prov.chat(model, history, params, on_delta, cancel,
-                                     tools=tools if step < steps else None,
-                                     keep_alive=store.settings["defaults"].get("keep_alive") or None)
+            note = ""
+            try:
+                calls, stats = prov.chat(model, history, params, on_delta, cancel,
+                                         tools=tools if step < steps else None,
+                                         keep_alive=store.settings["defaults"].get("keep_alive") or None)
+            except net.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 - Bedrock turned the PDF files down: use their text instead
+                why = str(e).lower()
+                if not params.get("documents") or reply["content"] or reply["thinking"] or \
+                        not any(w in why for w in ("validation", "document", "pdf", "http 400", "too large", "size")):
+                    raise
+                c["pdf_as_text"] = True                 # for the rest of this chat too
+                params.pop("documents", None)
+                lib_context = library.context_prompt(c.get("docs"), c.get("template", "auto"))
+                history[0]["content"] = history[0]["content"].replace(
+                    library.context_prompt(c.get("docs"), c.get("template", "auto"), as_files), lib_context)
+                note = "read the PDF%s as text (the model didn't accept the file: %s)" % ("s" if len(as_files) > 1 else "", str(e)[:160])
+                as_files = {}
+                calls, stats = prov.chat(model, history, params, on_delta, cancel,
+                                         tools=tools if step < steps else None,
+                                         keep_alive=store.settings["defaults"].get("keep_alive") or None)
+            if as_files and step == 0:
+                note = "read %s as PDF file%s" % (", ".join(as_files), "s" if len(as_files) > 1 else "")
+            if note:
+                stats = dict(stats, note=note)
             reply["stats"] = stats
             if not calls:
                 if not reply["content"].strip() and not reply["thinking"]:

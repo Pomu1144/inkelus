@@ -103,6 +103,10 @@
     if (Projects && (ev.type === "term" || ev.type === "term_done" || ev.type === "chat" || ev.type === "tests")) Projects.onEvent(ev);
     if (Java && (ev.type === "java" || ev.type === "java_setup" || ev.type === "debug")) Java.onEvent(ev);
     if (Ctx && ev.type === "context") Ctx.onEvent(ev);
+    if (ev.type === "aws_sso") {
+      closeModal();
+      if (ev.ok) { toast("Signed in to AWS."); refreshModels(); } else toast("AWS sign-in: " + ev.error, true);
+    }
     if (Api && ["server", "server_log", "script", "api_progress", "oauth", "rt", "rt_closed"].includes(ev.type)) Api.onEvent(ev);
     if (ev.type === "delta") {
       if (S.chat && ev.chat_id === S.chat.id) {
@@ -326,6 +330,7 @@
     if (st.tokens) p.push((st.approx ? "~" : "") + st.tokens + " tokens");
     if (st.tps) p.push(st.tps.toFixed(1) + " tok/s");
     if (st.seconds) p.push(st.seconds.toFixed(1) + "s");
+    if (st.note) p.push(st.note);
     return p.join(" · ");
   }
 
@@ -863,14 +868,14 @@
 
   // ── Library view ─────────────────────────────────────────────────────
   const LIB_HINTS = {
-    documents: "Reference material the AI can read: notes, specs, policies, code. Choose which documents a chat uses with the Library button in the chat header.",
+    documents: "Reference material the AI can read: notes, specs, policies, code, PDFs and Word files (imported as text). Choose which documents a chat uses with the Library button in the chat header.",
     templates: "Examples of how answers should look. Use headings, tables and {{placeholders}}; the AI copies the layout and fills in the blanks. In Auto mode (the default) it sees every template and picks the one that fits the request.",
-    standards: "Documentation standards the AI must follow whenever it writes documentation, in every chat: same sections, headings and order. Upload your company's templates (Markdown, text or Word) with Import. In a project, a doc file that matches the file patterns is checked: if the AI leaves out a required section, the change is refused and it has to fix it.",
+    standards: "Documentation standards the AI must follow whenever it writes documentation, in every chat: same sections, headings and order. Upload your company's templates (Markdown, text, PDF or Word) with Import. In a project, a doc file that matches the file patterns is checked: if the AI leaves out a required section, the change is refused and it has to fix it.",
   };
   const LIB_EMPTY = {
     documents: ["art_library", "No documents yet. Add reference material with New or Import, or upload one from the + menu in a chat."],
     templates: ["art_library", "No templates yet. Add an example answer layout with New or Import."],
-    standards: ["art_standards", "No documentation standards yet. Import your team's README, API or runbook templates (Markdown, text or Word), or write one with New."],
+    standards: ["art_standards", "No documentation standards yet. Import your team's README, API or runbook templates (Markdown, text, PDF or Word), or write one with New."],
   };
 
   async function loadLibrary(select) {
@@ -1006,10 +1011,13 @@
   }
   function renderConns() {
     const s = S.settings;
+    const where = c => c.type === "bedrock" ? "Amazon Bedrock · " + esc(c.region || "us-east-1") + " · " + esc(c.profile ? "profile " + c.profile : c.start_url ? "SSO " + c.start_url : "default profile")
+      : (c.type === "openai" ? "OpenAI-compatible" : "Ollama") + " · " + esc(c.url);
     $("#connList").innerHTML = s.connections.map(c => '<div class="conn' + (c.id === s.default_conn ? " default" : "") + '"><b>' +
-      esc(c.name) + '</b><span class="faint small">' + (c.type === "openai" ? "OpenAI-compatible" : "Ollama") + " · " + esc(c.url) +
+      esc(c.name) + '</b><span class="faint small">' + where(c) +
       '</span><div class="row">' + (c.id === s.default_conn ? '<span class="tag">default</span>'
         : '<button class="btn small" data-c="default" data-id="' + esc(c.id) + '">Make default</button>') +
+      (c.type === "bedrock" ? '<button class="btn small" data-c="sso" data-id="' + esc(c.id) + '" title="Sign in to AWS SSO in your browser (like aws sso login)">Sign in</button>' : "") +
       '<button class="btn small" data-c="test" data-id="' + esc(c.id) + '">Test</button><button class="btn small" data-c="edit" data-id="' +
       esc(c.id) + '">Edit</button><button class="btn small danger" data-c="remove" data-id="' + esc(c.id) + '">Remove</button></div></div>').join("");
   }
@@ -1019,6 +1027,29 @@
     $("#cType").value = c ? c.type : "ollama";
     $("#cUrl").value = c ? c.url : "";
     $("#cKey").value = c ? c.key : "";
+    const b = c && c.type === "bedrock" ? c : {};
+    [["cRegion", "region"], ["cProfile", "profile"], ["cStart", "start_url"], ["cSsoRegion", "sso_region"], ["cAccount", "account_id"],
+      ["cRole", "role_name"], ["cModels", "models"]].forEach(([el, k]) => ($("#" + el).value = b[k] || ""));
+    connType();
+  }
+  // the form shows a URL and key for Ollama / OpenAI-compatible servers, and AWS sign-in fields for Bedrock
+  function connType() {
+    const bed = $("#cType").value === "bedrock";
+    $$("[data-ctype]").forEach(el => (el.hidden = (el.dataset.ctype === "bedrock") !== bed));
+    if (bed && !$("#awsProfiles").dataset.loaded) {
+      $("#awsProfiles").dataset.loaded = "1";
+      api("GET", "connections/aws-profiles").then(r => {
+        $("#awsProfiles").innerHTML = r.profiles.map(p => '<option value="' + esc(p.name) + '">' + esc(p.name + (p.sso ? " (SSO)" : "") + (p.region ? " · " + p.region : "")) + "</option>").join("");
+        const sso = r.profiles.find(p => p.sso);
+        if (sso && !$("#cProfile").value && !$("#cId").value) { $("#cProfile").value = sso.name; if (sso.region && !$("#cRegion").value) $("#cRegion").value = sso.region; }
+      }).catch(() => {});
+    }
+  }
+  async function ssoLogin(c) {
+    const r = await api("POST", "connections/sso-login", { id: c.id });
+    openModal('<h3>Sign in to AWS</h3><p>A browser window opened on your AWS sign-in page. Check that it shows this code, then approve:</p>' +
+      '<p class="ssocode">' + esc(r.code) + '</p><p class="faint small">If no window opened, <a href="' + esc(r.url) + '" target="_blank" rel="noopener">open the sign-in page</a>. ' +
+      "This closes by itself when you're signed in.</p>");
   }
   async function patchSettings(fields) {
     S.settings = (await api("PATCH", "settings", fields)).settings;
@@ -1345,6 +1376,7 @@
       if (b.dataset.c === "edit") fillConnForm(c);
       else if (b.dataset.c === "default") { await patchSettings({ default_conn: c.id }); renderConns(); refreshModels(); }
       else if (b.dataset.c === "test") toast(c.name + ": " + (await api("GET", "models/" + c.id + "/ping")).text);
+      else if (b.dataset.c === "sso") await ssoLogin(c);
       else if (b.dataset.c === "remove" && confirm("Remove " + c.name + "? Chats that used it keep their history.")) {
         S.settings = (await api("DELETE", "connections/" + c.id)).settings;
         renderConns();
@@ -1354,13 +1386,15 @@
     $("#connForm").onsubmit = guard(async e => {
       e.preventDefault();
       S.settings = (await api("POST", "connections", { id: $("#cId").value, name: $("#cName").value, type: $("#cType").value,
-        url: $("#cUrl").value, key: $("#cKey").value })).settings;
+        url: $("#cUrl").value, key: $("#cKey").value, region: $("#cRegion").value, profile: $("#cProfile").value, start_url: $("#cStart").value,
+        sso_region: $("#cSsoRegion").value, account_id: $("#cAccount").value, role_name: $("#cRole").value, models: $("#cModels").value })).settings;
       fillConnForm(null);
       renderConns();
       refreshModels();
       toast("Server saved");
     });
     $("#cClear").onclick = () => fillConnForm(null);
+    $("#cType").onchange = connType;
     $("#backupBtn").onclick = () => download("backup");
     $("#restore").onchange = guard(async e => {
       const f = e.target.files[0];

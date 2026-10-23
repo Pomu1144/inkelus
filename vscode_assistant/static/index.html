@@ -70,7 +70,7 @@
           <span class="plus-wrap"><button class="btn small attach" type="button" id="plusBtn" title="Add images, documents, a project…" aria-haspopup="menu"><i data-icon="plus" class="plus-i"></i><span class="lbl">Add</span></button>
             <div class="menu" id="plusMenu" role="menu" hidden>
               <button type="button" data-plus="image" role="menuitem"><i data-icon="image"></i><span>Upload images<small>For models that can see images</small></span></button>
-              <button type="button" data-plus="doc" role="menuitem"><i data-icon="file-plus"></i><span>Upload documents<small>Text, Markdown, code or Word; the AI reads them in this chat</small></span></button>
+              <button type="button" data-plus="doc" role="menuitem"><i data-icon="file-plus"></i><span>Upload documents<small>Text, Markdown, code, PDF or Word; the AI reads them in this chat</small></span></button>
               <button type="button" data-plus="library" role="menuitem"><i data-icon="book"></i><span>Library documents and templates<small>Pick what this chat uses</small></span></button>
               <button type="button" data-plus="project" role="menuitem"><i data-icon="code"></i><span>Work on a project<small>Let the AI read and change a code project</small></span></button>
             </div></span>
@@ -422,9 +422,22 @@
           <form id="connForm" class="grid2">
             <input type="hidden" id="cId">
             <label>Name<input id="cName"></label>
-            <label>Type<select id="cType"><option value="ollama">Ollama</option><option value="openai">OpenAI-compatible</option></select></label>
-            <label class="full">Base URL<input id="cUrl" placeholder="http://localhost:11434"></label>
-            <label class="full">API key (optional)<input id="cKey" type="password" autocomplete="off"></label>
+            <label>Type<select id="cType"><option value="ollama">Ollama</option><option value="openai">OpenAI-compatible</option><option value="bedrock">Amazon Bedrock (AWS)</option></select></label>
+            <label class="full" data-ctype="url">Base URL<input id="cUrl" placeholder="http://localhost:11434"></label>
+            <label class="full" data-ctype="url">API key (optional)<input id="cKey" type="password" autocomplete="off"></label>
+            <p class="full faint small" data-ctype="bedrock" hidden>Claude and the other Bedrock models, through your company's AWS account. It signs in like the AWS CLI: pick your SSO profile (the one you use with <code>aws sso login</code>), or, without the AWS CLI, fill in your SSO details below and press <b>Sign in</b> after saving.</p>
+            <label data-ctype="bedrock" hidden>Region<input id="cRegion" placeholder="us-east-1" spellcheck="false"></label>
+            <label data-ctype="bedrock" hidden>AWS profile<input id="cProfile" list="awsProfiles" placeholder="default" spellcheck="false"><datalist id="awsProfiles"></datalist></label>
+            <details class="full" data-ctype="bedrock" hidden><summary class="small">No AWS CLI profile? Your SSO details</summary>
+              <div class="grid2">
+                <label class="full">SSO start URL<input id="cStart" placeholder="https://your-company.awsapps.com/start" spellcheck="false"></label>
+                <label>SSO region<input id="cSsoRegion" placeholder="us-east-1" spellcheck="false"></label>
+                <label>Account ID<input id="cAccount" placeholder="123456789012" spellcheck="false"></label>
+                <label class="full">Role name<input id="cRole" placeholder="e.g. BedrockUsers or DeveloperAccess" spellcheck="false"></label>
+              </div>
+              <p class="faint small">These are on your AWS access portal page: the start URL is its address, and each account lists the roles you can use.</p>
+            </details>
+            <label class="full" data-ctype="bedrock" hidden>Models (optional, one per line: only needed if your role can't list them)<textarea id="cModels" rows="2" spellcheck="false" placeholder="us.anthropic.claude-…"></textarea></label>
             <div class="full row end"><button class="btn" type="button" id="cClear">Clear</button><button class="btn primary" type="submit">Save server</button></div>
           </form>
           <p class="faint small">Ollama: http://localhost:11434 · LM Studio: http://localhost:1234/v1 · llama.cpp: http://localhost:8080/v1 · vLLM: http://localhost:8000/v1</p>

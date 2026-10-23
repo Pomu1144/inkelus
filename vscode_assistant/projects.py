@@ -26,7 +26,7 @@ import threading
 import time
 import zipfile
 
-from . import api as apimod, gitops, library as libmod, tasks as taskmod, testlog
+from . import api as apimod, docread, gitops, library as libmod, tasks as taskmod, testlog
 from .store import new_id
 
 IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "env", ".tox", ".mypy_cache",
@@ -633,7 +633,14 @@ class Project:
             full = self.resolve(a.get("path"), allow_root=False)
             if os.path.isdir(full):
                 raise ToolError("%s is a folder; use list_files." % self.rel(full))
-            text, _ = read_text(full)
+            if docread.kind(full):            # PDF and Word files: their text, to read (they can't be edited here)
+                try:
+                    text, _ = docread.extract_file(full)
+                except docread.DocError as e:
+                    raise ToolError("%s: %s" % (self.rel(full), e)) from None
+                text = "(text taken from %s; it can be read but not edited here)\n%s" % (os.path.basename(full), text)
+            else:
+                text, _ = read_text(full)
             lines = text.split("\n")
             if lines and lines[-1] == "":
                 lines.pop()
