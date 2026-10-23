@@ -1681,7 +1681,13 @@ class Handler(BaseHTTPRequestHandler):
                     lib.set_meta(stored, {"use_for": os.path.splitext(stored)[0], "files": "", "active": True})
             finally:
                 shutil.rmtree(tmpdir, ignore_errors=True)
-            return self.ok({"name": stored, "names": lib.names(kind)})
+            note = ""
+            if kind == "templates" and fname.lower().endswith(".docx"):
+                note = "Word template: the AI fills in a copy of it, keeping its formatting, and you download the result."
+            elif kind == "templates" and fname.lower().endswith(".doc"):
+                note = ("Saved as a text template. For the AI to fill in the Word file itself, open it in Word, save it as "
+                        ".docx (File › Save As › Word Document) and import that.")
+            return self.ok({"name": stored, "names": lib.names(kind), "note": note})
         if method == "GET":
             if name:
                 out = {"name": name, "text": lib.read(kind, name)}
@@ -1715,6 +1721,20 @@ class Handler(BaseHTTPRequestHandler):
             if kind == "templates" and c.get("template") == old:
                 c["template"] = new
         h.save_chats()
+
+    def api_outputs(self, method, parts, query):
+        """Files the AI made (filled Word templates), to download: /api/outputs/<id>/<name>."""
+        if method != "GET" or len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{12}", parts[0]):
+            return self.fail(404, "Not found")
+        folder = os.path.join(self.hub.store.dir, "outputs", parts[0])
+        name = os.path.basename(urllib.parse.unquote(parts[1]))
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path):
+            return self.fail(404, "That file is gone.")
+        with open(path, "rb") as f:
+            data = f.read()
+        ctype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if name.lower().endswith(".docx") else "application/octet-stream"
+        return self.send(200, data, ctype, {"Content-Disposition": "attachment; filename*=UTF-8''" + quote(name)})
 
     def api_backup(self, method, parts, query):
         h = self.hub

@@ -375,6 +375,8 @@
         (st === "error" || st === "denied" ? " bad" : "") + '">' + (st === "running" ? '<i class="spin"></i>' : "") +
         esc(st) + "</span></div>" +
         (res ? '<div class="res" title="Click to expand">' + esc(res.slice(0, 6000)) + "</div>" : "") +
+        (m.download ? '<div class="dl-row"><button class="btn small primary" data-dl="' + esc(m.download.id + "/" + encodeURIComponent(m.download.name)) + '">' +
+          icon("file") + "Download " + esc(m.download.name) + "</button></div>" : "") +
         (Projects && (m.diff || m.change) ? Projects.toolExtra(m) : "") + "</div>";
     }
     if (m.role === "assistant" && m.tool_calls && !(m.content || "").trim() && !m.thinking) {
@@ -951,6 +953,7 @@
   async function libImport(files) {
     if (!libConfirmLeave()) return;
     let last = null;
+    const notes = [];
     for (const f of files) {
       const data = await new Promise((res, rej) => {
         const r = new FileReader();
@@ -958,10 +961,10 @@
         r.onerror = rej;
         r.readAsDataURL(f);
       });
-      try { last = (await api("POST", "library/" + S.libKind + "/import", { filename: f.name, data })).name; }
+      try { const r = await api("POST", "library/" + S.libKind + "/import", { filename: f.name, data }); last = r.name; if (r.note) notes.push(r.note); }
       catch (e) { toast(f.name + ": " + e.message, true); }
     }
-    if (last) { await loadLibrary(last); toast("Imported " + files.length + " file" + (files.length === 1 ? "" : "s")); }
+    if (last) { await loadLibrary(last); toast("Imported " + files.length + " file" + (files.length === 1 ? "" : "s") + (notes.length ? ". " + notes.join(" ") : "")); }
   }
 
   // ── Settings view ────────────────────────────────────────────────────
@@ -1214,6 +1217,8 @@
     $("#messages").onclick = guard(async e => {
       const b = e.target.closest("[data-act]");
       if (b) return messageAction(b.dataset.act, +b.dataset.i);
+      const dl = e.target.closest("[data-dl]");
+      if (dl) { download("outputs/" + dl.dataset.dl); return; }
       const cp = e.target.closest("[data-copy]");
       if (cp) {
         await navigator.clipboard.writeText(cp.closest("pre").querySelector("code").textContent);

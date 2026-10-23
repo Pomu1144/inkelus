@@ -991,3 +991,6 @@ b.m { font: 700 10.5px var(--mono); min-width: 34px; color: var(--dim); }
 
 /* AWS SSO sign-in code */
 .ssocode { font: 600 26px var(--mono); letter-spacing: 4px; text-align: center; margin: 14px 0; }
+
+/* a file the AI made, under its tool step */
+.tool .dl-row { padding: 6px 10px 8px; }

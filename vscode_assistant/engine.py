@@ -7,7 +7,7 @@ nothing about HTTP or the page.
 """
 import json
 
-from . import agent_browser, context, net, projects, providers, web
+from . import agent_browser, context, docxfill, net, projects, providers, web
 
 TOOL_RESULT_LIMIT = 15000
 
@@ -61,6 +61,8 @@ def needs_confirm(store, c, name, preview=None):
     """Whether this tool call needs the user's OK before it runs."""
     if name in context.TOOL_NAMES:
         return False   # reads the local copy of the last sync; nothing goes online
+    if name == "fill_word_template":
+        return False   # makes a new file in the app's data folder; nothing is changed or sent
     if name in agent_browser.SELF_CONFIRMING:
         return False   # browser_login asks for approval itself, every time, whatever the settings
     if name in projects.TOOL_NAMES:
@@ -79,6 +81,28 @@ def needs_confirm(store, c, name, preview=None):
         mode = (store.settings.get("agent") or {}).get("confirm", "actions")
         return mode == "all" or (mode == "actions" and name not in agent_browser.READ_ONLY)
     return bool(store.settings["web"].get("confirm", True))
+
+
+def fill_word(store, word, args):
+    """Run fill_word_template: the filled .docx goes to the app's outputs folder. Returns (text for the model, download)."""
+    import os
+    import re as _re
+    import uuid
+    name = str(args.get("template") or "")
+    if name not in word:
+        raise ValueError("There's no Word template called %r. Use one of: %s." % (name, ", ".join(word)))
+    with open(word[name], "rb") as f:
+        data, done = docxfill.fill(f.read(), args.get("changes") or [])
+    fname = _re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(args.get("file_name") or "").strip()).strip(". ") or os.path.splitext(name)[0]
+    if not fname.lower().endswith(".docx"):
+        fname += ".docx"
+    oid = uuid.uuid4().hex[:12]
+    folder = os.path.join(store.dir, "outputs", oid)
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, fname), "wb") as f:
+        f.write(data)
+    return ("Made %s from the template %s (%s). The person can download it from the chat." % (fname, name, "; ".join(done)),
+            {"id": oid, "name": fname})
 
 
 def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, agent=None, projs=None, work=None):
@@ -109,6 +133,9 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
             tools = (tools or []) + agent_browser.TOOLS
         if c.get("context") and work is not None:
             tools = (tools or []) + context.TOOLS
+        word = library.word_templates(c.get("template", "auto")) if library else {}
+        if word:
+            tools = (tools or []) + [docxfill.TOOL]
         proj = projs.for_chat(c) if projs is not None else None
         if proj is not None:
             tools = (tools or []) + projects.TOOLS
@@ -225,7 +252,10 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
                         res["content"] += " Their note: " + c.pop("decline_note")
                     continue
                 try:
-                    if is_ctx:
+                    if call["name"] == "fill_word_template":
+                        text, res["download"] = fill_word(store, word, call["arguments"])
+                        is_err = False
+                    elif is_ctx:
                         text, is_err = work().run(call["name"], call["arguments"]), False
                     elif is_agent:
                         text, is_err = agent.run(c["id"], call["name"], call["arguments"]), False

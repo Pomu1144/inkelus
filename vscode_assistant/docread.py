@@ -56,29 +56,108 @@ def extract_file(path):
 
 
 # ── .docx ────────────────────────────────────────────────────────────────
+def render_table(rows):
+    """A table as text. rows: [[cell, …], …], each cell {"paras": [str], "colspan", "rowspan", "header"} (or a plain list of
+    paragraphs). A plain grid of one-line cells becomes a Markdown table; anything richer (several lines in a cell, merged
+    cells, rows of different lengths) an HTML table, so nothing is squeezed out of shape."""
+    norm = []
+    for row in rows:
+        out = []
+        for c in row:
+            c = c if isinstance(c, dict) else {"paras": list(c)}
+            paras = [p.strip() for p in c.get("paras") or []]
+            while paras and not paras[-1]:
+                paras.pop()
+            out.append(dict(c, paras=paras))
+        norm.append(out)
+    if not norm:
+        return ""
+    simple = all(len(r) == len(norm[0]) for r in norm) and all(
+        len(c["paras"]) <= 1 and c.get("colspan", 1) == 1 and c.get("rowspan", 1) == 1 for r in norm for c in r)
+    if simple:
+        md = lambda c: (c["paras"][0] if c["paras"] else "").replace("|", "\\|")
+        lines = ["| " + " | ".join(md(c) for c in norm[0]) + " |", "|" + "---|" * len(norm[0])]
+        lines += ["| " + " | ".join(md(c) for c in r) + " |" for r in norm[1:]]
+        return "\n".join(lines)
+    esc = lambda t: t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    out = ["<table>"]
+    for i, r in enumerate(norm):
+        cells = []
+        for c in r:
+            tag = "th" if c.get("header", i == 0) else "td"
+            attrs = (' colspan="%d"' % c["colspan"] if c.get("colspan", 1) > 1 else "") + (' rowspan="%d"' % c["rowspan"] if c.get("rowspan", 1) > 1 else "")
+            cells.append("<%s%s>%s</%s>" % (tag, attrs, "<br>".join(esc(p) for p in c["paras"]), tag))
+        out.append("<tr>" + "".join(cells) + "</tr>")
+    out.append("</table>")
+    return "\n".join(out)
+
+
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def _docx_para(p):
+    """A paragraph's text: text runs, tabs and line breaks (not deleted text from tracked changes)."""
+    out = []
+    for el in p.iter():
+        if el.tag == W + "t":
+            out.append(el.text or "")
+        elif el.tag == W + "tab":
+            out.append("\t")
+        elif el.tag in (W + "br", W + "cr"):
+            out.append("\n")
+    return "".join(out)
+
+
+def _docx_table(tbl):
+    rows, spans = [], {}                 # spans: column -> the cell a vertical merge started in
+    for ri, tr in enumerate(c for c in tbl if c.tag == W + "tr"):
+        header = tr.find("%strPr/%stblHeader" % (W, W)) is not None or ri == 0
+        row, col = [], 0
+        for tc in (c for c in tr if c.tag in (W + "tc", W + "sdt")):
+            tc = tc if tc.tag == W + "tc" else (tc.find(".//" + W + "tc") or tc)
+            pr = tc.find(W + "tcPr")
+            span = int((pr.find(W + "gridSpan").get(W + "val") if pr is not None and pr.find(W + "gridSpan") is not None else 1) or 1)
+            vm = pr.find(W + "vMerge") if pr is not None else None
+            if vm is not None and vm.get(W + "val", "continue") != "restart" and col in spans:
+                spans[col]["rowspan"] = spans[col].get("rowspan", 1) + 1          # covered by the cell above
+                col += span
+                continue
+            paras = []
+            for el in tc:
+                if el.tag == W + "p":
+                    paras += _docx_para(el).split("\n")
+                elif el.tag == W + "tbl":                 # a table inside a cell: its rows as lines
+                    paras += [" | ".join(" ".join(c["paras"]) for c in r) for r in _docx_table(el)]
+            cell = {"paras": paras, "colspan": span, "header": header}
+            if vm is not None:
+                spans[col] = cell
+            else:
+                spans.pop(col, None)
+            row.append(cell)
+            col += span
+        rows.append(row)
+    return rows
+
+
 def docx_text(data):
-    """Plain text from a Word document, with headings and list items marked up lightly."""
+    """Plain text from a Word document: headings and list items marked up lightly, tables kept whole."""
     import io
-    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     try:
         with zipfile.ZipFile(io.BytesIO(data) if isinstance(data, bytes) else data) as z:
             root = ElementTree.fromstring(z.read("word/document.xml"))
     except (zipfile.BadZipFile, KeyError, ElementTree.ParseError):
         raise DocError("That Word file is damaged or isn't really a .docx.") from None
     out = []
-    body = root.find(ns + "body")
+    body = root.find(W + "body")
     for el in (body if body is not None else root):
-        if el.tag == ns + "tbl":                       # tables: one row per line, cells split by " | "
-            for tr in el.iter(ns + "tr"):
-                cells = ["".join(t.text or "" for t in tc.iter(ns + "t")).strip() for tc in tr.iter(ns + "tc")]
-                out.append("| " + " | ".join(cells) + " |")
-            out.append("")
+        if el.tag == W + "tbl":
+            out += [render_table(_docx_table(el)), ""]
             continue
-        for p in ([el] if el.tag == ns + "p" else el.iter(ns + "p")):
-            text = "".join(t.text or "" for t in p.iter(ns + "t"))
-            style = p.find("%spPr/%spStyle" % (ns, ns))
-            style = style.get(ns + "val", "") if style is not None else ""
-            if p.find("%spPr/%snumPr" % (ns, ns)) is not None and text:
+        for p in ([el] if el.tag == W + "p" else el.iter(W + "p")):
+            text = _docx_para(p)
+            style = p.find("%spPr/%spStyle" % (W, W))
+            style = style.get(W + "val", "") if style is not None else ""
+            if p.find("%spPr/%snumPr" % (W, W)) is not None and text:
                 text = "- " + text
             m = re.match(r"Heading(\d)", style)
             if m and text:
@@ -155,8 +234,69 @@ class Cfb:
         return None
 
 
+def _papx_runs(wd, table, fc, lcb):
+    """[(fc start, fc end, {"in_table", "row_end"})] for every paragraph, from the PAPX pages (PlcBtePapx)."""
+    import bisect
+    plc = table[fc:fc + lcb]
+    n = (lcb - 4) // 8
+    if n <= 0:
+        return [], bisect
+    pns = struct.unpack_from("<%dI" % n, plc, (n + 1) * 4)
+    runs = []
+    for pn in pns:
+        page = wd[(pn & 0x3FFFFF) * 512:(pn & 0x3FFFFF) * 512 + 512]
+        if len(page) < 512:
+            continue
+        crun = page[511]
+        fcs = struct.unpack_from("<%dI" % (crun + 1), page, 0)
+        for i in range(crun):
+            boff = page[4 * (crun + 1) + 13 * i] * 2
+            flags = {"in_table": False, "row_end": False}
+            if boff:
+                cb = page[boff]
+                start, size = (boff + 1, 2 * cb - 1) if cb else (boff + 2, 2 * page[boff + 1])
+                grp = page[start + 2:start + size]          # after the style index
+                j = 0
+                while j + 2 <= len(grp):
+                    sprm = struct.unpack_from("<H", grp, j)[0]
+                    j += 2
+                    spra = sprm >> 13
+                    if spra in (0, 1):
+                        op = grp[j:j + 1]
+                        j += 1
+                    elif spra in (2, 4, 5):
+                        op = grp[j:j + 2]
+                        j += 2
+                    elif spra == 3:
+                        op = grp[j:j + 4]
+                        j += 4
+                    elif spra == 7:
+                        op = grp[j:j + 3]
+                        j += 3
+                    else:                                    # variable length
+                        if sprm == 0xD608 and j + 2 <= len(grp):
+                            ln = struct.unpack_from("<H", grp, j)[0] - 1
+                            j += 2
+                        elif j < len(grp):
+                            ln = grp[j]
+                            j += 1
+                        else:
+                            break
+                        op = grp[j:j + ln]
+                        j += ln
+                    if sprm == 0x2416:
+                        flags["in_table"] = bool(op[:1] and op[0])
+                    elif sprm == 0x2417:
+                        flags["row_end"] = bool(op[:1] and op[0])
+                    elif sprm == 0x6649:
+                        flags["in_table"] = flags["in_table"] or (len(op) == 4 and struct.unpack("<I", op)[0] > 0)
+            runs.append((fcs[i], fcs[i + 1], flags))
+    runs.sort(key=lambda r: r[0])
+    return runs, bisect
+
+
 def doc_text(data):
-    """Plain text from a Word 97-2003 .doc file."""
+    """Plain text from a Word 97-2003 .doc file, with tables kept whole."""
     try:
         cfb = Cfb(data)
     except struct.error:
@@ -177,9 +317,11 @@ def doc_text(data):
     csw = struct.unpack_from("<H", wd, pos)[0]
     pos += 2 + csw * 2
     cslw = struct.unpack_from("<H", wd, pos)[0]
+    rglw = pos + 2
     pos += 2 + cslw * 4
     pos += 2                                                  # cbRgFcLcb
     fc_clx, lcb_clx = struct.unpack_from("<II", wd, pos + 33 * 8)
+    fc_papx, lcb_papx = struct.unpack_from("<II", wd, pos + 13 * 8)
     clx = table[fc_clx:fc_clx + lcb_clx]
     i = 0
     while i < len(clx) and clx[i] == 1:                       # Prc: formatting we don't need
@@ -190,46 +332,76 @@ def doc_text(data):
     plc = clx[i + 5:i + 5 + lcb]
     n = (lcb - 4) // 12
     cps = struct.unpack_from("<%dI" % (n + 1), plc, 0)
-    parts = []
+    ccp_text = struct.unpack_from("<I", wd, rglw + 3 * 4)[0]           # the main text, before headers and notes
+    chars, fcs = [], []                                       # the text, and each character's file offset
     for k in range(n):
         fc = struct.unpack_from("<I", plc, (n + 1) * 4 + k * 8 + 2)[0]
         count = cps[k + 1] - cps[k]
         if fc & 0x40000000:
             off = (fc & 0x3FFFFFFF) // 2
-            parts.append(wd[off:off + count].decode("cp1252", "replace"))
+            chars.append(wd[off:off + count].decode("cp1252", "replace"))
+            fcs.append((off, 1, count))
         else:
-            parts.append(wd[fc:fc + 2 * count].decode("utf-16-le", "replace"))
-    text = "".join(parts)
-    ccp_text = struct.unpack_from("<I", wd, 32 + 2 + csw * 2 + 2 + 3 * 4)[0]   # the main text, before headers/notes
-    if 0 < ccp_text <= len(text):
-        text = text[:ccp_text]
-    return _clean_word(text)
+            chars.append(wd[fc:fc + 2 * count].decode("utf-16-le", "replace"))
+            fcs.append((fc, 2, count))
+    runs, bisect = _papx_runs(wd, table, fc_papx, lcb_papx)
+    starts = [r[0] for r in runs]
+
+    def props(piece, idx):
+        base, width, _ = fcs[piece]
+        at = base + idx * width
+        j = bisect.bisect_right(starts, at) - 1
+        return runs[j][2] if j >= 0 and runs[j][0] <= at < runs[j][1] else {"in_table": False, "row_end": False}
+
+    out, buf, cell, row, rows = [], [], [], [], []
+    left = ccp_text if ccp_text > 0 else sum(len(c) for c in chars)
+
+    def flush_table():
+        if rows:
+            out.extend([render_table(rows), ""])
+            rows.clear()
+    for piece, text in enumerate(chars):
+        for idx, ch in enumerate(text):
+            if left <= 0:
+                break
+            left -= 1
+            if ch == "\r":
+                pr = props(piece, idx)
+                if pr["in_table"]:
+                    cell.append("".join(buf))                 # a new line inside a table cell
+                else:
+                    flush_table()
+                    out.append("".join(buf))
+                buf = []
+            elif ch == "\x07":
+                pr = props(piece, idx)
+                if pr["row_end"] or (not runs and not buf and not cell):
+                    if row:
+                        rows.append(row)
+                    row = []
+                else:
+                    cell.append("".join(buf))
+                    row.append([_clean_word(c) for c in cell])
+                    cell = []
+                buf = []
+            else:
+                buf.append(ch)
+    if buf:
+        cell.append("".join(buf)) if cell else out.append("".join(buf))
+    if row:
+        rows.append(row)
+    flush_table()
+    text = "\n".join(_clean_word(t) if not t.startswith(("| ", "<table>")) else t for t in out)
+    return re.sub(r"\n{3,}", "\n\n", text).strip() + "\n"
 
 
 def _clean_word(text):
-    # fields: \x13 instructions \x14 shown result \x15 — keep what's shown
-    for _ in range(4):                                        # fields can nest
+    """One paragraph of .doc text: fields reduced to what they show, control characters dropped."""
+    for _ in range(4):                                        # fields can nest: \x13 code \x14 shown \x15
         text = re.sub(r"\x13[^\x13\x14\x15]*\x14([^\x13\x15]*)\x15", r"\1", text)
         text = re.sub(r"\x13[^\x13\x14\x15]*\x15", "", text)
-    # tables: each cell ends with \x07, and a row with one more; written as "| a | b |" rows
-    text = text.replace("\x07\x07", "\x07\x1e")
-    out = []
-    for para in text.replace("\r", "\n").split("\n"):
-        if "\x07" not in para:
-            out.append(para)
-            continue
-        for row in para.split("\x1e"):
-            if "\x07" not in row:                     # text right after a table, in the same paragraph run
-                out.append(row)
-                continue
-            cells = row.split("\x07")
-            if cells and cells[-1] == "":
-                cells.pop()
-            if cells:
-                out.append("| " + " | ".join(c.strip() for c in cells) + " |")
-    text = "\n".join(out).replace("\x0b", "\n").replace("\x0c", "\n\n")
-    text = re.sub(r"[\x00-\x08\x0e-\x1f]", "", text)
-    return re.sub(r"\n{3,}", "\n\n", text).strip() + "\n"
+    text = text.replace("\x0b", "\n").replace("\x0c", "\n").replace("\x1e", "-").replace("\x1f", "")
+    return re.sub(r"[\x00-\x08\x0e-\x1f]", "", text)
 
 
 # ── PDF: the file ────────────────────────────────────────────────────────
