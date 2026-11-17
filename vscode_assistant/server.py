@@ -485,6 +485,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.ok({"chat": c, "busy": c["id"] in h.streams})
             if method == "PATCH":
                 b = self.body()
+                if "pdf_mode" in b:
+                    if b["pdf_mode"] not in ("visual", "text"):
+                        return self.fail(400, "Choose visual or text PDF reading mode.")
+                    c["pdf_mode"] = b["pdf_mode"]
                 for k in ("title", "model", "browser", "agent", "context", "docs", "template", "group", "project"):
                     if k in b:
                         c[k] = b[k]
@@ -541,6 +545,7 @@ class Handler(BaseHTTPRequestHandler):
                     size = b.get("size")
                     c.setdefault("doc_meta", {})[name] = {
                         "filename": str(b.get("filename") or name)[:255],
+                        "pdf": os.path.isfile(h.library.original("documents", name)),
                         "size": size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None}
                 else:
                     docs = [d for d in docs if d != name]
@@ -1717,6 +1722,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.fail(404, "Unknown library section.")
         kind = parts[0]
         name = (query.get("name") or [""])[0]
+        if len(parts) > 1 and parts[1] == "original" and method == "GET":
+            if name not in lib.names(kind) or not os.path.isfile(lib.original(kind, name)):
+                return self.fail(404, "Original PDF not found.")
+            filename = name if name.lower().endswith(".pdf") else os.path.splitext(name)[0] + ".pdf"
+            with open(lib.original(kind, name), "rb") as stream:
+                return self.send(200, stream.read(), "application/pdf",
+                                 {"Content-Disposition": "inline; filename*=UTF-8''" + quote(filename)})
         if len(parts) > 1 and parts[1] == "import" and method == "POST":
             b = self.body()
             tmpdir = tempfile.mkdtemp()
@@ -1725,7 +1737,8 @@ class Handler(BaseHTTPRequestHandler):
                 p = os.path.join(tmpdir, fname)
                 with open(p, "wb") as f:
                     f.write(base64.b64decode(b.get("data") or ""))
-                stored = lib.import_file(kind, p)
+                with self.hub.lock:
+                    stored = lib.import_file(kind, p)
                 if kind == "standards":   # an uploaded standard is in force straight away
                     lib.set_meta(stored, {"use_for": os.path.splitext(stored)[0], "files": "", "active": True})
             finally:
@@ -1733,7 +1746,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.ok({"name": stored, "names": lib.names(kind)})
         if method == "GET":
             if name:
-                out = {"name": name, "text": lib.read(kind, name)}
+                original = name in lib.names(kind) and os.path.isfile(lib.original(kind, name))
+                out = {"name": name, "text": lib.read(kind, name), "original_pdf": original}
                 if kind == "standards":
                     out["meta"] = lib.meta(name)
                 return self.ok(out)
@@ -1744,6 +1758,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "PUT":
             b = self.body()
             old, new = b.get("old") or "", b.get("name") or ""
+            if (old or new).lower().endswith(".pdf"):
+                return self.fail(400, "Original PDFs are read-only here. Upload a revised PDF or save extracted text as a new .md document.")
             if old and old in lib.names(kind) and new != old:
                 new = lib.rename(kind, old, new)
                 self.rename_in_chats(kind, old, new)

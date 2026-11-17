@@ -2,7 +2,7 @@
 
 A local AI **command center** for the models on your own computer, written in
 pure Python. Core features use only the standard library; optional PDF output
-uses ReportLab. No Node or admin rights are needed. It runs as a small server on your computer and opens in
+uses ReportLab and visual PDF input uses PyMuPDF. No Node or admin rights are needed. It runs as a small server on your computer and opens in
 its own browser window, and from there it opens whatever else it needs, such
 as the **agent browser** window the AI can drive.
 
@@ -525,7 +525,7 @@ Open **Library** in the left rail. It has three tabs:
 - **Documents**: notes, specs, policies, code, anything the AI should know
   about. Create them in the editor, or click **Import…** to add text files
   (`.txt`, `.md`, `.csv`, `.json`, source code…), **PDFs** or **Word** files
-  (`.docx` and the older `.doc`), which are converted to text. See
+  (`.docx` and the older `.doc`). PDFs retain their originals; Word files are converted to text. See
   [PDF and Word files](#pdf-and-word-files).
 - **Templates**: examples of how an answer should look. Write them with
   headings, tables and `{{placeholders}}`; the AI copies the layout and fills
@@ -536,31 +536,40 @@ Open **Library** in the left rail. It has three tabs:
 
 ### PDF and Word files
 
-PDFs, Word `.docx` and old Word `.doc` files are read by the app itself
-(standard library only, nothing to install), so they work with **every**
-model: local ones on Ollama, OpenAI-compatible servers and Bedrock alike.
+PDF uploads remain `.pdf` files with their original bytes and layout. An optional
+text cache is separate from the original and used only for previews or explicitly
+selected text-only reading. Word `.docx` and old `.doc` imports still extract text.
 
 - **Where:** **+ › Upload documents** in a chat, **Library › Import…**,
   documentation standards, files the AI reads in a **Project** (read-only:
   it can't edit them), and PDF or Word links the **web sandbox** opens.
-- **What comes out:** the text page by page (`[Page 2]`), with words, lines
-  and table rows kept together; Word headings, lists and tables are marked
-  up. Compressed PDFs, PDFs with object streams, and PDFs that are only
-  locked against printing or copying (RC4 and AES) are read. A PDF that
-  needs a password to open is refused with a clear message.
-- **Scanned PDFs** are pictures of pages with no text in them. The app says
-  so instead of guessing (reading them needs OCR: save them with recognized
-  text from Acrobat or Word first). In a mixed PDF, the scanned pages are
-  listed and the rest is read.
-- **With a model on Amazon Bedrock**, the chat also sends the original PDF
-  (up to 5 files of 4.5 MB each), so the model sees the layout and tables
-  itself; the reply says "read … as PDF file". If Bedrock turns the file
-  down, the app sends the extracted text instead, automatically, and says
-  so under the reply. Reading PDFs never depends on Bedrock.
+- **Open PDF** on an attachment opens the unchanged original. The Library text
+  editor shows a read-only extracted preview, never the PDF's source layout.
+- **Visual mode (default):** Bedrock receives original PDFs (up to 5 files of
+  4.5 MB each). Local Ollama and OpenAI-compatible vision models receive rendered
+  page images, preserving columns, tables, equations, diagrams, and scanned pages.
+  Install `python -m pip install -r requirements-pdf.txt` for local visual reading.
+  Ollama's model capabilities are checked; OpenAI-compatible servers must use a
+  vision model. A text-only model cannot interpret page images.
+- **Bounded page reading:** the first page of up to four PDFs is loaded initially.
+  The model uses `read_pdf_pages` to inspect up to four additional pages per call.
+  Up to eight page images stay in the current context, each bounded to 1800 pixels
+  on its longest edge. The reply metadata reports loaded/total page counts, so
+  loading one page is never presented as having supplied the whole document.
+  Very fine print may be limited by this image resolution and model vision quality.
+- **Text only:** choose **Library > PDF reading mode > Text only** if layout does
+  not matter or the selected model cannot see images. Scanned pages cannot be read
+  in this mode without OCR. The app never silently falls back to flattened text
+  when visual/native PDF input fails.
+- **Existing imports:** older `.md` entries with PDFs saved in `.originals/` use
+  those original files for visual reading too; re-uploading is not required.
+  PDF input preservation does not make the separate `create_pdf` output tool an
+  editor for the source PDF's layout.
 
 In a chat, click **Library** in the header to choose:
 
 - which **documents** the AI reads in that chat, and
+- whether PDF reading preserves layout or uses text only, and
 - which **template** it follows. **Auto** (the default) lets the AI see every
   template and use the one that matches the request (ask for "a bug report
   about…" and it uses *Bug report*). You can also pin one template, or choose

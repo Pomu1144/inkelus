@@ -6,15 +6,16 @@ standards/   documentation standards: layouts the model MUST follow whenever it 
              (READMEs, guides, API docs…), in every chat. In a project, a doc file that matches a
              standard's file patterns is checked: a missing required section stops the write.
 
-Everything is stored as UTF-8 text so it can be opened and edited outside the
-app too. PDF and Word files (.pdf, .docx, .doc) are converted to text when imported (docread.py);
-an imported PDF's original is kept too (documents/.originals/), so a model that reads PDF files
-itself (Bedrock) can be given the file as well as its text.
+PDF imports retain original binary .pdf files. Optional extracted text is cached
+separately in .text/ for previews and explicit text-only reading. Older imports
+keep their original PDFs in .originals/ and remain readable. Word imports and
+other documents are stored as UTF-8 text.
 """
 import fnmatch
 import json
 import os
 import re
+import shutil
 
 from . import docread
 
@@ -25,6 +26,7 @@ MAX_IMPORT = 2 * 1024 * 1024        # bytes read from an imported file
 DOC_LIMIT = 24000                   # chars of one document sent to the model
 DOCS_TOTAL = 60000                  # chars of all documents together
 ORIGINALS = ".originals"            # imported PDFs, next to their text: documents/.originals/<name>.pdf
+TEXT_CACHE = ".text"                # optional PDF text cache; never the source document
 NATIVE_MAX = 4_500_000              # largest PDF handed to a model as a file (Bedrock's limit per document)
 TEMPLATES_TOTAL = 16000             # chars of templates in "auto" mode
 
@@ -185,6 +187,18 @@ class Library:
         return os.path.join(self.dir(kind), name)
 
     def read(self, kind, name):
+        if name.lower().endswith(".pdf") and os.path.isfile(self.path(kind, name)):
+            cache = self.text_cache(kind, name)
+            if not os.path.isfile(cache):
+                try:
+                    text, _ = docread.extract_file(self.path(kind, name))
+                except docread.DocError as e:
+                    text = "Text extraction unavailable: %s. Read the original PDF visually instead." % e
+                os.makedirs(os.path.dirname(cache), exist_ok=True)
+                with open(cache, "w", encoding="utf-8") as stream:
+                    stream.write(text)
+            with open(cache, encoding="utf-8") as stream:
+                return stream.read()
         try:
             with open(self.path(kind, name), encoding="utf-8", errors="replace") as f:
                 return f.read()
@@ -192,13 +206,15 @@ class Library:
             return ""
 
     def save(self, kind, name, text):
+        if name.lower().endswith(".pdf"):
+            raise ValueError("PDF originals cannot be overwritten with text. Import a PDF or save text with a .md name.")
         p = self.path(kind, name)
         with open(p, "w", encoding="utf-8", newline="") as f:
             f.write(text)
         return os.path.basename(p)
 
     def delete(self, kind, name):
-        for p in (self.path(kind, name), self.original(kind, name)):
+        for p in (self.path(kind, name), self.original(kind, name), self.text_cache(kind, name)):
             try:
                 os.remove(p)
             except OSError:
@@ -206,15 +222,22 @@ class Library:
 
     def original(self, kind, name):
         """Where the original PDF of an imported document is kept (it may not exist)."""
+        if name.lower().endswith(".pdf") and os.path.isfile(self.path(kind, name)):
+            return self.path(kind, name)
         return os.path.join(self.dir(kind), ORIGINALS, clean_name(name) + ".pdf")
 
-    def pdf_originals(self, docs):
+    def text_cache(self, kind, name):
+        return os.path.join(self.dir(kind), TEXT_CACHE, clean_name(name) + ".txt")
+
+    def pdf_originals(self, docs, max_bytes=NATIVE_MAX):
         """{document name: path} for the chosen documents that came from a PDF small enough to send as a file."""
         out = {}
         for d in docs or []:
+            if d not in self.names("documents"):
+                continue
             p = self.original("documents", d)
             try:
-                if 0 < os.path.getsize(p) <= NATIVE_MAX:
+                if 0 < os.path.getsize(p) and (max_bytes is None or os.path.getsize(p) <= max_bytes):
                     out[d] = p
             except OSError:
                 pass
@@ -222,13 +245,21 @@ class Library:
 
     def rename(self, kind, old, new):
         src, dst = self.path(kind, old), self.path(kind, new)
+        if old.lower().endswith(".pdf") and not new.lower().endswith(".pdf"):
+            raise ValueError("Keep the .pdf extension on an original PDF.")
+        if new.lower().endswith(".pdf") and not old.lower().endswith(".pdf"):
+            raise ValueError("Renaming text to .pdf does not create a PDF. Import the original file instead.")
         if src == dst:
             return os.path.basename(dst)
         if os.path.exists(dst):
             raise ValueError("%s already exists." % os.path.basename(dst))
+        legacy = self.original(kind, old) if not old.lower().endswith(".pdf") else None
         os.replace(src, dst)
-        if os.path.exists(self.original(kind, old)):
-            os.replace(self.original(kind, old), self.original(kind, os.path.basename(dst)))
+        if legacy and os.path.exists(legacy):
+            os.replace(legacy, self.original(kind, os.path.basename(dst)))
+        cache = self.text_cache(kind, old)
+        if os.path.isfile(cache):
+            os.replace(cache, self.text_cache(kind, os.path.basename(dst)))
         if kind == "standards":
             self.set_meta(os.path.basename(dst), None, old=os.path.basename(src))
         return os.path.basename(dst)
@@ -239,6 +270,18 @@ class Library:
         with open(src, "rb") as f:
             head = f.read(8)
         doc = docread.kind(base, head)
+        if doc == "pdf":
+            if not head.startswith(b"%PDF"):
+                raise ValueError("This file is not a valid PDF.")
+            if os.path.getsize(src) > docread.MAX_BYTES:
+                raise ValueError("PDF is over the 60 MB import limit.")
+            base = os.path.splitext(base)[0] + ".pdf"
+            name, n = base, 2
+            while os.path.exists(self.path(kind, name)):
+                name = "%s (%d).pdf" % (os.path.splitext(base)[0], n)
+                n += 1
+            shutil.copyfile(src, self.path(kind, name))  # original bytes, including scanned pages and layout
+            return name
         if doc:
             try:
                 text, info = docread.extract_file(src)
@@ -258,14 +301,10 @@ class Library:
             stem, ext = os.path.splitext(base)
             name, n = "%s (%d)%s" % (stem, n, ext), n + 1
         stored = self.save(kind, name, text)
-        if doc == "pdf":                       # keep the PDF itself too, for models that read PDF files
-            os.makedirs(os.path.dirname(self.original(kind, stored)), exist_ok=True)
-            import shutil
-            shutil.copyfile(src, self.original(kind, stored))
         return stored
 
     # ── What the model sees ─────────────────────────────────────────────
-    def context_prompt(self, docs, template, as_files=()):
+    def context_prompt(self, docs, template, as_files=(), as_images=()):
         """System-prompt text for the chosen documents and template.
 
         template: "" or None = no template, "auto" = every template (the model
@@ -278,6 +317,9 @@ class Library:
             budget = DOCS_TOTAL
             blocks = []
             for d in docs:
+                if d in as_images:
+                    blocks.append('<document name="%s">(original PDF; read page images using read_pdf_pages)</document>' % d)
+                    continue
                 if d in as_files:
                     blocks.append('<document name="%s">(attached as the original PDF file: read it there)</document>' % d)
                     continue
@@ -397,3 +439,4 @@ def check_document(text, standard_text):
             positions.append(idx)
     in_order = positions == sorted(positions)
     return {"missing": missing, "in_order": in_order, "required": [d for d, _ in req]}
+
