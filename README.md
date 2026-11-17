@@ -1,8 +1,8 @@
 # VSCode Assistant
 
 A local AI **command center** for the models on your own computer, written in
-pure Python with only the standard library: no pip installs, no Node, and no
-admin rights needed. It runs as a small server on your computer and opens in
+pure Python. Core features use only the standard library; optional PDF output
+uses ReportLab. No Node or admin rights are needed. It runs as a small server on your computer and opens in
 its own browser window, and from there it opens whatever else it needs, such
 as the **agent browser** window the AI can drive.
 
@@ -44,6 +44,36 @@ on the start page. **Blue dark**, **Light** and **Match system** are in
 **Settings › Appearance**. You can paste or drag images into the message box.
 
 ## Features
+
+### Downloadable PDFs
+
+Install the optional PDF renderer once, using the same Python that runs the app:
+
+```bash
+python -m pip install -r requirements-pdf.txt
+```
+
+Restart the app, choose a model that supports tools (such as Qwen), and ask:
+"Make a study guide from the attached document and give me a PDF."
+The assistant can call `create_pdf` with Web and Browser off. Python generates
+the file locally and a **Download PDF** card appears in the conversation.
+Ask for changes to create another version. Completed answers also have a
+**Save PDF** button, which exports their text without another model call.
+
+PDF output supports titles, headings, paragraphs, lists, wrapping, page breaks,
+and page numbers. Other Markdown remains literal text. This creates new text
+documents; it does not preserve or edit an uploaded PDF's original layout.
+Images, rendered LaTeX, and complex table layout are not supported. Unsupported
+font characters produce a clear error rather than a corrupted PDF.
+
+Files stay in the app data folder under `artifacts/<chat-id>/`, and download
+cards remain available after restarting. JSON conversation backups include
+the cards but not the PDF bytes: download important PDFs separately.
+
+To run PDF output checks: `python -m pip install -r requirements-test.txt`, then
+`python -m unittest discover -s tests -v`.
+
+### Other features
 
 - **Chat**
   - Replies stream in as they're written.
@@ -797,3 +827,4 @@ vscode_assistant/store.py          settings + chats on disk
 vscode_assistant/static/icons.js   the app's line icons
 vscode_assistant/assets/           app icon, logos, illustrations and the Inter font
 ```
+

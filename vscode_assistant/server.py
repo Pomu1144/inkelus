@@ -30,7 +30,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import agent_browser, api, apirun, bedrock, context, engine, gitops, javadebug, javals, net, projects, providers, realtime, tasks, tsls, web
+from . import agent_browser, api, apirun, artifacts, bedrock, context, engine, gitops, javadebug, javals, net, projects, providers, realtime, tasks, tsls, web
 from .library import KINDS, Library
 from .store import Store, new_id
 
@@ -553,6 +553,32 @@ class Handler(BaseHTTPRequestHandler):
                 return self.fail(400, "Unknown action.")
             h.save_chats()
             return self.ok({"chat": c})
+        if sub == "artifacts" and method == "GET" and len(parts) == 3:
+            aid = parts[2]
+            artifact = next((a for m in c["messages"] for a in m.get("artifacts", []) if a.get("id") == aid), None)
+            if not artifact:
+                return self.fail(404, "Document not found in this conversation.")
+            path = artifacts.artifact_path(h.store.dir, c["id"], aid)
+            if not os.path.isfile(path):
+                return self.fail(404, "This PDF is no longer available on this computer.")
+            with open(path, "rb") as stream:
+                return self.send(200, stream.read(), "application/pdf",
+                                 {"Content-Disposition": "attachment; filename*=UTF-8''" + quote(artifact["filename"])})
+        if sub == "pdf" and method == "POST":
+            b = self.body()
+            index = b.get("index")
+            if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(c["messages"]):
+                return self.fail(400, "No such message.")
+            message = c["messages"][index]
+            if c["id"] in h.streams:
+                return self.fail(409, "Wait for the reply to finish.")
+            if message["role"] != "assistant" or message.get("error") or not message.get("content", "").strip():
+                return self.fail(400, "Choose a completed assistant answer.")
+            artifact = artifacts.create(h.store.dir, c["id"], c["title"][:300],
+                                        providers._strip_think(message["content"]))
+            message.setdefault("artifacts", []).append(artifact)
+            h.save_chats()
+            return self.ok({"chat": c, "artifact": artifact})
         if sub == "export" and method == "GET":
             safe = "".join(ch for ch in c["title"] if ch.isalnum() or ch in " -_").strip()[:60] or "chat"
             return self.send(200, engine.chat_markdown(c), "text/markdown; charset=utf-8",
@@ -1835,3 +1861,4 @@ def main(argv=None):
     ap.add_argument("--web", action="store_true", help=argparse.SUPPRESS)  # older launch command; now the only mode
     a = ap.parse_args(argv)
     serve(a.port, not a.no_open, not a.tab, idle_exit=not (a.keep_running or a.no_open))
+
