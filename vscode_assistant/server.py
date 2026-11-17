@@ -518,12 +518,35 @@ class Handler(BaseHTTPRequestHandler):
             c["model"] = model
             h.store.settings["last_model"] = model
             h.save_settings()
-            c["messages"].append({"role": "user", "content": text, "images": images})
+            documents = [dict({"name": name}, **(c.get("doc_meta", {}).get(name) or {}))
+                         for name in c.get("docs", []) if name in h.library.names("documents")]
+            c["messages"].append({"role": "user", "content": text, "images": images, "documents": documents})
             if not c.get("titled"):
                 t = " ".join(text.split()) or "Image"
                 c["title"] = t if len(t) <= 48 else t[:46] + "…"
             h.start(c)
             return self.ok()
+        if sub == "documents" and method in ("POST", "DELETE"):
+            b = self.body()
+            name = b.get("name")
+            if not isinstance(name, str):
+                return self.fail(400, "Choose a document.")
+            with h.lock:
+                docs = list(c.get("docs") or [])
+                if method == "POST":
+                    if name not in h.library.names("documents"):
+                        return self.fail(404, "Document not found in Library.")
+                    if name not in docs:
+                        docs.append(name)
+                    size = b.get("size")
+                    c.setdefault("doc_meta", {})[name] = {
+                        "filename": str(b.get("filename") or name)[:255],
+                        "size": size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None}
+                else:
+                    docs = [d for d in docs if d != name]
+                c["docs"] = docs
+                h.save_chats()
+            return self.ok({"chat": c})
         if sub == "stop" and method == "POST":
             if c["id"] in h.streams:
                 h.streams[c["id"]].set()

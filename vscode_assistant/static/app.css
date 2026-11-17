@@ -185,6 +185,17 @@ main { min-width: 0; min-height: 0; }
 .composer .send.stop { background: var(--panel-hi); border-color: var(--line-2); color: var(--text); }
 .attachments { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 14px; }
 .attachments:not(:empty) { padding-top: 10px; }
+.document-card { display:flex; align-items:center; gap:12px; max-width:100%; width:310px; padding:12px; border:1px solid var(--line-2); background:var(--panel); border-radius:14px; color:var(--text); box-sizing:border-box; }
+.document-kind { display:flex; align-items:center; justify-content:center; flex:0 0 42px; height:48px; border-radius:9px; background:var(--panel-hi); color:var(--accent); font-size:11px; font-weight:700; letter-spacing:.5px; }
+.document-info { flex:1; min-width:0; }
+.document-info strong { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px; font-weight:600; }
+.document-info small { display:block; margin-top:5px; font-size:11px; color:var(--dim); overflow-wrap:anywhere; }
+.document-info .spin { display:inline-block; width:10px; height:10px; }
+.document-card button { flex-shrink:0; width:26px; height:26px; display:grid; place-items:center; border:0; border-radius:50%; background:var(--panel-hi); color:var(--dim); cursor:pointer; }
+.document-card button:hover { color:var(--text); }
+.document-card.failed { border-color:#ce7777; }
+.document-info .document-error { color:#ce7777; }
+.message-documents { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
 .att { display: flex; align-items: center; gap: 6px; background: var(--panel-2); border: 1px solid var(--line); padding: 2px 4px; font-size: 12px; color: var(--dim); }
 .att img { height: 28px; }
 .att button { background: none; border: 0; color: var(--faint); cursor: pointer; }

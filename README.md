@@ -75,6 +75,18 @@ To run PDF output checks: `python -m pip install -r requirements-test.txt`, then
 
 ### Other features
 
+Document uploads now appear as cards above the message box, showing the original
+filename, file size, and reading/processing/ready status. Failed uploads stay
+visible with their error. Remove a card to detach that document from the chat;
+the imported copy remains in Library. The Send button waits for active uploads.
+You can also drag documents into the composer or paste files. Attached documents
+appear on sent messages, and ready cards return when you reopen the chat.
+
+Attachment checks: `node tests/attachment-state.cjs` and
+`python -m unittest discover -s tests -v`. An optional Playwright UI check lives
+in `tests/attachment-ui.cjs` (requires Playwright and a Chromium installation;
+set `CHROMIUM_PATH` to use a system browser).
+
 - **Chat**
   - Replies stream in as they're written.
   - Markdown is formatted: code blocks with a Copy button, tables, lists,

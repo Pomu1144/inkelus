@@ -13,7 +13,7 @@
   const S = {
     settings: null, chats: [], library: { documents: [], templates: [] }, dataDir: "",
     view: "chat", activeId: null, chat: null, busy: new Set(),
-    models: [], images: [], started: {}, libKind: "documents", libCurrent: null, libDirty: false,
+    models: [], images: [], uploads: [], uploadId: 0, started: {}, libKind: "documents", libCurrent: null, libDirty: false,
     search: "", searchIds: null,
   };
 
@@ -312,17 +312,43 @@
   }
   async function attachDocs(files) {
     const c = await ensureChat();
-    const added = [];
-    for (const f of files) {
-      const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = rej; r.readAsDataURL(f); });
-      try { added.push((await api("POST", "library/documents/import", { filename: f.name, data })).name); }
-      catch (e) { toast(f.name + ": " + e.message, true); }
+    const batch = Array.from(files).map(file => ({id: ++S.uploadId, chat: c.id, file,
+      filename: file.name, size: file.size, status: "Reading file…", pending: true}));
+    S.uploads.push(...batch);
+    renderAttachments();
+    for (const upload of batch) {
+      if (upload.removed) continue;
+      try {
+        const data = await new Promise((res, rej) => {
+          const r = new FileReader();
+          r.onload = () => res(String(r.result).split(",")[1] || "");
+          r.onerror = () => rej(new Error("Could not read this file. Try uploading it again."));
+          r.onabort = () => rej(new Error("File reading was cancelled."));
+          r.readAsDataURL(upload.file);
+        });
+        if (upload.removed) continue;
+        upload.status = "Uploading and processing…";
+        renderAttachments();
+        const imported = await api("POST", "library/documents/import", {filename: upload.filename, data});
+        S.library.documents = Array.from(new Set(S.library.documents.concat(imported.name)));
+        if (upload.removed) continue; // the imported copy stays in Library, but is not attached
+        const result = await api("POST", "chats/" + c.id + "/documents", {
+          name: imported.name, filename: upload.filename, size: upload.size});
+        if (upload.removed) {
+          const detached = await api("DELETE", "chats/" + c.id + "/documents", {name: imported.name});
+          if (S.chat && S.chat.id === c.id) S.chat = detached.chat;
+        } else if (S.chat && S.chat.id === c.id) S.chat = result.chat;
+        S.uploads = S.uploads.filter(u => u !== upload);
+      } catch (e) {
+        upload.status = "Upload failed";
+        upload.error = e.message;
+      } finally {
+        upload.pending = false;
+        delete upload.file;
+        renderAttachments();
+        if (S.chat && S.chat.id === c.id) renderChat();
+      }
     }
-    if (!added.length) return;
-    S.library.documents = Array.from(new Set(S.library.documents.concat(added)));
-    await patchChat({ docs: Array.from(new Set((c.docs || []).concat(added))) });
-    renderChat();
-    toast("The AI can read " + added.join(", ") + " in this chat. It's kept in Library › Documents.");
   }
 
   function statsText(st) {
@@ -355,6 +381,7 @@
     $("#libBtn").textContent = docs ? "Library · " + docs + " doc" + (docs === 1 ? "" : "s") : "Library";
     $("#fastBtn").classList.toggle("on", c ? !!(c.params && c.params.fast) : fastDefault());
     fillParams();
+    renderAttachments();
     updateSend();
     const msgs = c ? c.messages : [];
     $("#empty").hidden = msgs.length > 0;
@@ -398,9 +425,11 @@
     else body = assistantBody(m, live);
     const imgs = (m.images || []).length ? '<div class="imgs">' + m.images.map(b =>
       '<img src="data:image/png;base64,' + esc(b) + '" alt="">').join("") + "</div>" : "";
+    const docs = (m.documents || []).map(d => documentCard(d.filename || d.name, d.size, "Attached", "")).join("");
     const meta = m.stats ? '<div class="meta">' + esc(statsText(m.stats)) + "</div>" : "";
     return '<div class="msg ' + (user ? "user" : "assistant") + (m.error ? " error" : "") + '" data-i="' + i + '">' +
       '<div class="msg-head"><i class="dot"></i><span>' + esc(who) + "</span></div>" + imgs +
+      (docs ? '<div class="message-documents">' + docs + '</div>' : '') +
       '<div class="bubble' + (user || m.error ? "" : " md") + '">' + body + "</div>" +
       artifactHTML(m) + '<div class="msg-foot">' + acts + meta + "</div></div>";
   }
@@ -460,7 +489,9 @@
 
   function updateSend() {
     const busy = S.chat && S.busy.has(S.chat.id);
+    const uploading = S.uploads.some(u => S.chat && u.chat === S.chat.id && u.pending && !u.removed);
     const b = $("#sendBtn");
+    b.disabled = !busy && uploading;
     b.querySelector(".lbl").textContent = busy ? "Stop" : "Send";
     b.title = busy ? "Stop (Esc)" : "Send (Enter)";
     b.classList.toggle("stop", !!busy);
@@ -469,6 +500,9 @@
 
   async function send() {
     if (S.chat && S.busy.has(S.chat.id)) { await api("POST", "chats/" + S.chat.id + "/stop", {}); return; }
+    if (S.uploads.some(u => S.chat && u.chat === S.chat.id && u.pending && !u.removed)) {
+      toast("Wait for your documents to finish uploading."); return;
+    }
     const text = $("#prompt").value.trim();
     if (!text && !S.images.length) return;
     const model = currentModel();
@@ -583,9 +617,37 @@
     }
   }
   function renderAttachments() {
+    const c = S.chat;
+    const docs = c ? (c.docs || []).filter(n => S.library.documents.includes(n)).map(name => {
+      const meta = (c.doc_meta || {})[name] || {};
+      return documentCard(meta.filename || name, meta.size, "Ready · attached to this chat",
+        '<button type="button" data-doc-rm="' + esc(name) + '" aria-label="Remove ' + esc(meta.filename || name) + '">' + icon("close") + '</button>');
+    }).join("") : "";
+    const uploads = S.uploads.filter(u => c && u.chat === c.id && !u.removed).map(u =>
+      documentCard(u.filename, u.size, u.status,
+        '<button type="button" data-upload-rm="' + u.id + '" aria-label="Remove ' + esc(u.filename) + '">' + icon("close") + '</button>', u.error, u.pending)).join("");
     $("#attachments").innerHTML = S.images.map((im, i) =>
       '<span class="att"><img src="data:image/png;base64,' + esc(im.data) + '" alt="">' + esc(im.name) +
-      '<button type="button" data-rm="' + i + '">' + icon("close") + "</button></span>").join("");
+      '<button type="button" data-rm="' + i + '">' + icon("close") + "</button></span>").join("") + docs + uploads;
+    updateSend();
+  }
+
+  function documentCard(name, size, status, action, error, pending) {
+    const ext = (name.split('.').pop() || 'FILE').slice(0, 5).toUpperCase();
+    return '<div class="document-card' + (error ? ' failed' : '') + '"' +
+      (error ? ' title="' + esc(error) + '"' : '') + '>' +
+      '<span class="document-kind" aria-hidden="true">' + esc(ext) + '</span><div class="document-info">' +
+      '<strong title="' + esc(name) + '">' + esc(name) + '</strong><small>' +
+      (pending ? '<i class="spin"></i> ' : '') + esc(status) +
+      (typeof size === 'number' ? ' · ' + esc(fmtBytes(size)) : '') + '</small>' +
+      (error ? '<small class="document-error">' + esc(error) + '</small>' : '') + '</div>' + action + '</div>';
+  }
+
+  function addFiles(files) {
+    const all = Array.from(files);
+    addImageFiles(all.filter(f => f.type.startsWith('image/')));
+    const docs = all.filter(f => !f.type.startsWith('image/'));
+    if (docs.length) guard(attachDocs)(docs);
   }
   function autosize() {
     const t = $("#prompt");
@@ -1259,18 +1321,32 @@
     };
     $("#prompt").oninput = autosize;
     $("#prompt").onpaste = e => {
-      const files = Array.from(e.clipboardData.files || []).filter(f => f.type.startsWith("image/"));
-      if (files.length) { e.preventDefault(); addImageFiles(files); }
+      const files = Array.from(e.clipboardData.files || []);
+      if (files.length) { e.preventDefault(); addFiles(files); }
     };
     $("#attach").onchange = e => { addImageFiles(e.target.files); e.target.value = ""; };
-    $("#attachments").onclick = e => {
+    $("#attachments").onclick = guard(async e => {
+      const pending = e.target.closest("[data-upload-rm]");
+      if (pending) {
+        const u = S.uploads.find(u => u.id === +pending.dataset.uploadRm);
+        if (u) u.removed = true;
+        S.uploads = S.uploads.filter(u => !u.removed);
+        renderAttachments(); return;
+      }
+      const doc = e.target.closest("[data-doc-rm]");
+      if (doc && S.chat) {
+        const id = S.chat.id;
+        const result = await api("DELETE", "chats/" + id + "/documents", {name: doc.dataset.docRm});
+        if (S.chat && S.chat.id === id) { S.chat = result.chat; renderChat(); }
+        return;
+      }
       const b = e.target.closest("[data-rm]");
       if (b) { S.images.splice(+b.dataset.rm, 1); renderAttachments(); }
-    };
+    });
     const comp = $("#composer");
     comp.ondragover = e => { e.preventDefault(); comp.classList.add("drag"); };
     comp.ondragleave = () => comp.classList.remove("drag");
-    comp.ondrop = e => { e.preventDefault(); comp.classList.remove("drag"); addImageFiles(e.dataTransfer.files); };
+    comp.ondrop = e => { e.preventDefault(); comp.classList.remove("drag"); addFiles(e.dataTransfer.files); };
     document.addEventListener("keydown", e => {
       if (e.key === "Escape") {
         if (!$("#plusMenu").hidden) { togglePlus(false); return; }

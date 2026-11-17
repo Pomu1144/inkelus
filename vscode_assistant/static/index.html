@@ -63,7 +63,7 @@
         <div class="messages" id="messages"></div>
       </div>
       <form class="composer" id="composer">
-        <div class="attachments" id="attachments"></div>
+        <div class="attachments" id="attachments" role="region" aria-label="Attachments" aria-live="polite" aria-relevant="additions text"></div>
         <textarea id="prompt" rows="2" placeholder="Write to the model…   (Enter to send, Shift+Enter for a new line)"></textarea>
         <div class="bar">
           <input type="file" id="attach" accept="image/*" multiple hidden><input type="file" id="attachDoc" multiple hidden>
@@ -475,3 +475,4 @@
 <script src="/static/app.js"></script>
 </body>
 </html>
+
