@@ -65,7 +65,8 @@ async function remove(selector, dataset) {
   finishImport(); await upload;
   assert.deepEqual(chats.A.docs, ['Homework.md']); assert.deepEqual(chats.B.docs, []);
   t.S.chat = chats.A; t.renderAttachments();
-  assert(html().includes('Ready · attached to this chat'));
+  assert(html().includes('Ready · original PDF preserved'));
+  assert(html().includes('Open PDF'));
   assert(!element('#sendBtn').disabled);
   await remove('[data-doc-rm]', {docRm:'Homework.md'});
   assert(!html().includes('Homework'));

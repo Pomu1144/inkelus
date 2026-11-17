@@ -620,7 +620,9 @@
     const c = S.chat;
     const docs = c ? (c.docs || []).filter(n => S.library.documents.includes(n)).map(name => {
       const meta = (c.doc_meta || {})[name] || {};
-      return documentCard(meta.filename || name, meta.size, "Ready · attached to this chat",
+      const pdf = meta.pdf || (meta.filename || name).toLowerCase().endsWith('.pdf');
+      return documentCard(meta.filename || name, meta.size, pdf ? "Ready · original PDF preserved" : "Ready · attached to this chat",
+        (pdf ? originalPDFLink(name) : '') +
         '<button type="button" data-doc-rm="' + esc(name) + '" aria-label="Remove ' + esc(meta.filename || name) + '">' + icon("close") + '</button>');
     }).join("") : "";
     const uploads = S.uploads.filter(u => c && u.chat === c.id && !u.removed).map(u =>
@@ -641,6 +643,11 @@
       (pending ? '<i class="spin"></i> ' : '') + esc(status) +
       (typeof size === 'number' ? ' · ' + esc(fmtBytes(size)) : '') + '</small>' +
       (error ? '<small class="document-error">' + esc(error) + '</small>' : '') + '</div>' + action + '</div>';
+  }
+
+  function originalPDFLink(name) {
+    return '<a class="original-pdf" target="_blank" rel="noopener" href="/api/library/documents/original?name=' +
+      encodeURIComponent(name) + '&amp;token=' + encodeURIComponent(TOKEN) + '">Open PDF</a>';
   }
 
   function addFiles(files) {
@@ -806,7 +813,10 @@
       (docs.length ? docs.map(n => '<label class="check"><input type="checkbox" value="' + esc(n) + '"' +
         ((c.docs || []).includes(n) ? " checked" : "") + "> " + esc(n) + "</label>").join("")
         : '<p class="dim small">No documents yet. Add some on the Library page.</p>') +
-      '</div><h3>Template</h3><p class="faint small">Auto lets the AI see every template and use the one that fits the request.</p><div class="opts">' +
+      '</div><h3>PDF reading mode</h3><select id="pdfMode"><option value="visual"' + (c.pdf_mode !== 'text' ? ' selected' : '') + '>Preserve layout (PDF / vision model)</option>' +
+      '<option value="text"' + (c.pdf_mode === 'text' ? ' selected' : '') + '>Text only (layout and images lost)</option></select>' +
+      '<p class="faint small">PDF originals are always kept. Visual mode sends original files or page images. Local models need vision support and PyMuPDF.</p>' +
+      '<h3>Template</h3><p class="faint small">Auto lets the AI see every template and use the one that fits the request.</p><div class="opts">' +
       [["auto", "Auto: pick the matching template"], ["", "None"]].concat(temps.map(t => [t, t])).map(([v, l]) =>
         '<label class="check"><input type="radio" name="tpl" value="' + esc(v) + '"' + (v === tsel ? " checked" : "") + "> " + esc(l) + "</label>").join("") +
       '</div>' + (S.stdCount ? '<p class="faint small">' + S.stdCount + " documentation standard" + (S.stdCount === 1 ? " applies" : "s apply") +
@@ -818,7 +828,7 @@
       const picked = Array.from(d.querySelectorAll('input[type=checkbox]:checked')).map(i => i.value);
       const tpl = (d.querySelector('input[name=tpl]:checked') || {}).value ?? "auto";
       closeModal();
-      await patchChat({ docs: picked, template: tpl });
+      await patchChat({ docs: picked, template: tpl, pdf_mode: d.querySelector('#pdfMode').value });
       renderChat();
     });
   }
@@ -937,7 +947,7 @@
 
   // ── Library view ─────────────────────────────────────────────────────
   const LIB_HINTS = {
-    documents: "Reference material the AI can read: notes, specs, policies, code, PDFs and Word files (imported as text). Choose which documents a chat uses with the Library button in the chat header.",
+    documents: "Reference documents for chat. PDFs keep their original files and layout; the text shown here is an extracted preview. Word files are imported as text. Choose documents and PDF reading mode using Library in the chat header.",
     templates: "Examples of how answers should look. Use headings, tables and {{placeholders}}; the AI copies the layout and fills in the blanks. In Auto mode (the default) it sees every template and picks the one that fits the request.",
     standards: "Documentation standards the AI must follow whenever it writes documentation, in every chat: same sections, headings and order. Upload your company's templates (Markdown, text, PDF or Word) with Import. In a project, a doc file that matches the file patterns is checked: if the AI leaves out a required section, the change is refused and it has to fix it.",
   };
@@ -975,13 +985,18 @@
     $("#libName").value = name || "";
     const got = name ? await api("GET", "library/" + S.libKind + "?name=" + encodeURIComponent(name)) : { text: "" };
     $("#libText").value = got.text;
+    const original = !!got.original_pdf;
+    $("#libText").readOnly = original;
+    $("#libName").readOnly = original;
+    $("#libSave").disabled = original;
     $("#stdFields").hidden = S.libKind !== "standards" || !name;
     const m = got.meta || { active: true, use_for: "", files: "" };
     $("#stdActive").checked = m.active;
     $("#stdUse").value = m.use_for;
     $("#stdFiles").value = m.files;
     S.libDirty = false;
-    $("#libStatus").textContent = "";
+    $("#libStatus").innerHTML = original ? 'Extracted text preview only. Your original PDF is unchanged. ' +
+      (S.libKind === 'documents' ? originalPDFLink(name) : '') : '';
     $$("#libItems li").forEach(li => li.classList.toggle("active", li.dataset.name === name));
   }
   function libConfirmLeave() {

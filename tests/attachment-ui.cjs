@@ -61,7 +61,7 @@ const {chromium} = require(require.resolve('playwright', {paths: [process.env.CO
     assert.deepEqual(await page.evaluate(() => window.chats.chatA.docs), ['Homework.md']);
     assert.deepEqual(await page.evaluate(() => window.chats.chatB.docs), []);
     await page.evaluate(() => { window.__attachments.S.chat = window.chats.chatA; window.__attachments.renderAttachments(); });
-    assert((await page.locator('#attachments').innerText()).includes('Ready · attached to this chat'));
+    assert((await page.locator('#attachments').innerText()).includes('Ready · original PDF preserved'));
     assert(await page.locator('#sendBtn').isEnabled());
     await page.locator('#attachments [data-doc-rm]').click();
     await page.waitForFunction(() => window.chats.chatA.docs.length === 0);

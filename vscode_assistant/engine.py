@@ -6,8 +6,9 @@ It runs on a worker thread and reports through callbacks, so it knows
 nothing about HTTP or the page.
 """
 import json
+import os
 
-from . import agent_browser, artifacts, context, net, projects, providers, web
+from . import agent_browser, artifacts, context, net, pdfinput, projects, providers, web
 
 TOOL_RESULT_LIMIT = 15000
 
@@ -59,7 +60,7 @@ def agent_for(store):
 
 def needs_confirm(store, c, name, preview=None):
     """Whether this tool call needs the user's OK before it runs."""
-    if name in artifacts.TOOL_NAMES:
+    if name in artifacts.TOOL_NAMES or name in pdfinput.TOOL_NAMES:
         return False  # creates a new document only in this chat's output folder
     if name in context.TOOL_NAMES:
         return False   # reads the local copy of the last sync; nothing goes online
@@ -125,17 +126,36 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
             steps = max(steps, 40)
             driving = True
         params = dict(c["params"])
-        # a model on Bedrock reads PDFs itself (tables, layout): give it the original files as well as the
-        # chat. Everyone else, and Bedrock if it turns a file down, gets the text the app took out of them.
+        # Preserve the source PDF. Native providers receive the file; local vision
+        # models receive page images and a tool for additional pages. Text is opt-in.
         as_files = {}
-        if library and conn["type"] == "bedrock" and not c.get("pdf_as_text"):
-            as_files = dict(list(library.pdf_originals(c.get("docs")).items())[:5])
+        pdf_reader = None
+        pdf_paths = library.pdf_originals(c.get("docs"), max_bytes=None) if library else {}
+        text_only = c.get("pdf_mode") == "text"
+        if pdf_paths and not text_only:
+            if conn["type"] == "bedrock":
+                if len(pdf_paths) > 5 or any(os.path.getsize(p) > 4_500_000 for p in pdf_paths.values()):
+                    raise ValueError('This provider accepts at most 5 PDFs, each under 4.5 MB. Attach fewer/smaller PDFs or choose a local vision model.')
+                as_files = pdf_paths
+            else:
+                if conn["type"] == "ollama":
+                    caps = prov.show(model).get("capabilities")
+                    if caps is not None and "vision" not in caps:
+                        raise ValueError('This model cannot see PDF layout. Select a vision model, or explicitly choose Text only under Library > PDF reading mode.')
+                pdf_reader = pdfinput.Reader(pdf_paths)
+                tools = (tools or []) + pdfinput.TOOLS
+                steps = max(steps, min(64, 4 + (sum(pdf_reader.counts.values()) + 3) // 4))
         if as_files:
             params["documents"] = []
             for d, path in as_files.items():
                 with open(path, "rb") as f:
                     params["documents"].append({"name": d, "data": f.read()})
-        lib_context = library.context_prompt(c.get("docs"), c.get("template", "auto"), as_files) if library else ""
+        lib_context = library.context_prompt(c.get("docs"), c.get("template", "auto"), as_files,
+                                             pdf_paths if pdf_reader else ()) if library else ""
+        if pdf_reader:
+            lib_context += "\n\n" + pdf_reader.prompt()
+        if pdf_paths and text_only:
+            lib_context += "\n\nPDF reading is explicitly set to TEXT ONLY. Layout, diagrams and scanned content may be missing. Do not claim to have seen the original pages."
         if (lib_context or driving) and not params.get("num_ctx") and conn["type"] == "ollama":
             params["num_ctx"] = max(context_size(lib_context, c["messages"]), 16384 if driving else 0)
         for step in range(steps + 1):
@@ -156,6 +176,8 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
             if system:
                 history.append({"role": "system", "content": system})
             history += compact([m for m in c["messages"] if not m.get("error") and m["role"] != "note"])
+            if pdf_reader:
+                history.append(pdf_reader.message())  # transient; do not bloat saved chats with rendered pages
             reply = {"role": "assistant", "content": "", "thinking": "", "model": c["model"]}
             c["messages"].append(reply)
             emit("update")
@@ -173,23 +195,16 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
                                          keep_alive=store.settings["defaults"].get("keep_alive") or None)
             except net.Cancelled:
                 raise
-            except Exception as e:  # noqa: BLE001 - Bedrock turned the PDF files down: use their text instead
-                why = str(e).lower()
-                if not params.get("documents") or reply["content"] or reply["thinking"] or \
-                        not any(w in why for w in ("validation", "document", "pdf", "http 400", "too large", "size")):
-                    raise
-                c["pdf_as_text"] = True                 # for the rest of this chat too
-                params.pop("documents", None)
-                lib_context = library.context_prompt(c.get("docs"), c.get("template", "auto"))
-                history[0]["content"] = history[0]["content"].replace(
-                    library.context_prompt(c.get("docs"), c.get("template", "auto"), as_files), lib_context)
-                note = "read the PDF%s as text (the model didn't accept the file: %s)" % ("s" if len(as_files) > 1 else "", str(e)[:160])
-                as_files = {}
-                calls, stats = prov.chat(model, history, params, on_delta, cancel,
-                                         tools=tools if step < steps else None,
-                                         keep_alive=store.settings["defaults"].get("keep_alive") or None)
+            except Exception as e:
+                if pdf_paths and not text_only:
+                    raise RuntimeError('PDF layout input failed: %s. Use a PDF/vision-capable model. Text-only reading must be selected explicitly in Library.' % e) from e
+                raise
             if as_files and step == 0:
                 note = "read %s as PDF file%s" % (", ".join(as_files), "s" if len(as_files) > 1 else "")
+            elif pdf_reader:
+                note = "PDF layout mode · %d/%d pages loaded · current images: " % (len(pdf_reader.seen), sum(pdf_reader.counts.values())) + ", ".join('%s p.%d' % key for key in pdf_reader.loaded)
+            elif pdf_paths and text_only:
+                note = "PDF text-only mode · original layout not supplied"
             if note:
                 stats = dict(stats, note=note)
             reply["stats"] = stats
@@ -232,7 +247,10 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
                         res["content"] += " Their note: " + c.pop("decline_note")
                     continue
                 try:
-                    if call["name"] in artifacts.TOOL_NAMES:
+                    if call["name"] in pdfinput.TOOL_NAMES:
+                        args = call["arguments"]
+                        text, is_err = pdf_reader.load(args.get("document"), args.get("pages")), False
+                    elif call["name"] in artifacts.TOOL_NAMES:
                         args = call["arguments"]
                         artifact = artifacts.create(store.dir, c["id"], args.get("title", "Document"),
                                                     args.get("content", ""), args.get("filename"))

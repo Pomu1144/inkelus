@@ -194,6 +194,7 @@ main { min-width: 0; min-height: 0; }
 .document-card button { flex-shrink:0; width:26px; height:26px; display:grid; place-items:center; border:0; border-radius:50%; background:var(--panel-hi); color:var(--dim); cursor:pointer; }
 .document-card button:hover { color:var(--text); }
 .document-card.failed { border-color:#ce7777; }
+.document-card .original-pdf { flex-shrink:0; font-size:11px; color:var(--accent); }
 .document-info .document-error { color:#ce7777; }
 .message-documents { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
 .att { display: flex; align-items: center; gap: 6px; background: var(--panel-2); border: 1px solid var(--line); padding: 2px 4px; font-size: 12px; color: var(--dim); }

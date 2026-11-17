@@ -11,7 +11,7 @@ class DocumentAttachmentTests(unittest.TestCase):
         self.chat = {'id': 'chat123', 'docs': [], 'messages': [], 'model': 'ollama::test', 'titled': True}
         self.handler = object.__new__(Handler)
         self.handler.hub = SimpleNamespace(
-            chat=lambda _: self.chat, library=SimpleNamespace(names=lambda _: ['source.md', 'other.md']),
+            chat=lambda _: self.chat, library=SimpleNamespace(names=lambda _: ['source.md', 'other.md'], original=lambda *a: '/nonexistent.pdf'),
             store=SimpleNamespace(settings={}), lock=threading.RLock(), streams={},
             save_chats=Mock(), save_settings=Mock(), start=Mock())
         self.handler.ok = Mock()
