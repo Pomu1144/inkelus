@@ -365,6 +365,12 @@
     scrollBottom(true);
   }
 
+  function artifactHTML(m) {
+    return (m.artifacts || []).map(a => '<div class="pdf-artifact"><strong>PDF · ' + esc(a.filename) +
+      '</strong> <span>' + Math.max(1, Math.ceil(a.size / 1024)) + ' KB</span> ' +
+      '<button type="button" data-artifact="' + esc(a.id) + '">Download PDF</button></div>').join("");
+  }
+
   function messageHTML(m, i, live) {
     if (m.role === "tool") {
       const args = JSON.stringify(m.arguments || {});
@@ -375,7 +381,7 @@
         (st === "error" || st === "denied" ? " bad" : "") + '">' + (st === "running" ? '<i class="spin"></i>' : "") +
         esc(st) + "</span></div>" +
         (res ? '<div class="res" title="Click to expand">' + esc(res.slice(0, 6000)) + "</div>" : "") +
-        (Projects && (m.diff || m.change) ? Projects.toolExtra(m) : "") + "</div>";
+        (Projects && (m.diff || m.change) ? Projects.toolExtra(m) : "") + artifactHTML(m) + "</div>";
     }
     if (m.role === "assistant" && m.tool_calls && !(m.content || "").trim() && !m.thinking) {
       return '<div class="using">→ using tools</div>';
@@ -385,7 +391,7 @@
     const btn = (act, label) => '<button data-act="' + act + '" data-i="' + i + '" title="' + label + '">' + ICONS[act] +
       '<span class="lbl">' + label + "</span></button>";
     const acts = live ? "" : '<span class="acts">' + btn("copy", "Copy") + (user ? btn("edit", "Edit") : "") +
-      (m.role === "assistant" ? btn("regen", "Retry") : "") + btn("delete", "Delete") + "</span>";
+      (m.role === "assistant" ? btn("regen", "Retry") + (!m.error && (m.content || '').trim() ? btn("pdf", "Save PDF") : '') : "") + btn("delete", "Delete") + "</span>";
     let body;
     if (m.error) body = esc(m.error);
     else if (user) body = esc(m.content || "");
@@ -396,11 +402,12 @@
     return '<div class="msg ' + (user ? "user" : "assistant") + (m.error ? " error" : "") + '" data-i="' + i + '">' +
       '<div class="msg-head"><i class="dot"></i><span>' + esc(who) + "</span></div>" + imgs +
       '<div class="bubble' + (user || m.error ? "" : " md") + '">' + body + "</div>" +
-      '<div class="msg-foot">' + acts + meta + "</div></div>";
+      artifactHTML(m) + '<div class="msg-foot">' + acts + meta + "</div></div>";
   }
 
   const svg = d => '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="' + d + '"/></svg>';
   const ICONS = {
+    pdf: svg("M4 1.5h5l3 3v10H4z M9 1.5v3h3 M6 8h4 M6 11h4"),
     copy: svg("M5.5 5.5h7v8h-7z M3.5 10.5v-8h7"),
     edit: svg("M10.5 2.5l3 3-7.5 7.5H3v-3z"),
     regen: svg("M13 8a5 5 0 1 1-1.5-3.5M13 2.5v3h-3"),
@@ -1212,7 +1219,19 @@
 
     // messages
     $("#messages").onclick = guard(async e => {
+      const file = e.target.closest("[data-artifact]");
+      if (file) return download("chats/" + S.chat.id + "/artifacts/" + encodeURIComponent(file.dataset.artifact));
       const b = e.target.closest("[data-act]");
+      if (b && b.dataset.act === "pdf") {
+        b.disabled = true;
+        try {
+          const result = await api("POST", "chats/" + S.chat.id + "/pdf", {index: +b.dataset.i});
+          S.chat = result.chat;
+          renderChat();
+          download("chats/" + S.chat.id + "/artifacts/" + result.artifact.id);
+        } finally { b.disabled = false; }
+        return;
+      }
       if (b) return messageAction(b.dataset.act, +b.dataset.i);
       const cp = e.target.closest("[data-copy]");
       if (cp) {
@@ -1450,3 +1469,4 @@
     }, 250);
   })();
 })();
+

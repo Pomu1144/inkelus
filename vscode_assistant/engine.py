@@ -7,7 +7,7 @@ nothing about HTTP or the page.
 """
 import json
 
-from . import agent_browser, context, net, projects, providers, web
+from . import agent_browser, artifacts, context, net, projects, providers, web
 
 TOOL_RESULT_LIMIT = 15000
 
@@ -59,6 +59,8 @@ def agent_for(store):
 
 def needs_confirm(store, c, name, preview=None):
     """Whether this tool call needs the user's OK before it runs."""
+    if name in artifacts.TOOL_NAMES:
+        return False  # creates a new document only in this chat's output folder
     if name in context.TOOL_NAMES:
         return False   # reads the local copy of the last sync; nothing goes online
     if name in agent_browser.SELF_CONFIRMING:
@@ -112,6 +114,9 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
         proj = projs.for_chat(c) if projs is not None else None
         if proj is not None:
             tools = (tools or []) + projects.TOOLS
+        pdf_enabled = artifacts.available()
+        if pdf_enabled:
+            tools = (tools or []) + artifacts.TOOLS
         driving = bool(c.get("agent") and agent is not None)
         steps = int(bs.get("max_steps") or 12)
         if driving:  # browser tasks take many small steps
@@ -136,6 +141,8 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
         for step in range(steps + 1):
             history = []
             system = (c["params"].get("system") or "").strip()
+            if pdf_enabled:
+                system = (system + "\n\n" if system else "") + artifacts.SYSTEM_PROMPT
             if lib_context:
                 system = (system + "\n\n" if system else "") + lib_context
             if tools and sandbox is not None and c.get("browser"):
@@ -225,7 +232,13 @@ def run_turn(store, library, c, conn, model, cancel, emit, ask_tool, sandbox, ag
                         res["content"] += " Their note: " + c.pop("decline_note")
                     continue
                 try:
-                    if is_ctx:
+                    if call["name"] in artifacts.TOOL_NAMES:
+                        args = call["arguments"]
+                        artifact = artifacts.create(store.dir, c["id"], args.get("title", "Document"),
+                                                    args.get("content", ""), args.get("filename"))
+                        res["artifacts"] = [artifact]
+                        text, is_err = json.dumps({"created": artifact}, ensure_ascii=False), False
+                    elif is_ctx:
                         text, is_err = work().run(call["name"], call["arguments"]), False
                     elif is_agent:
                         text, is_err = agent.run(c["id"], call["name"], call["arguments"]), False
@@ -295,3 +308,4 @@ def import_chats(store, data):
             m["images"] = [i.split(",", 1)[-1] for i in m.get("images") or []]
     store.chats.extend(added)
     return len(added)
+
