@@ -62,7 +62,7 @@
     document.documentElement.dataset.theme = t;
     $$("#themeTabs .tab").forEach(b => b.classList.toggle("active", b.dataset.theme === t));
     const sfx = t === "warm" ? "_warm" : "";
-    $("#favicon").href = "/assets/icon" + sfx + ".png";
+    $("#favicon").href = "/assets/inkelus-icon.png";
     $$(".logo-small, .logo-greet").forEach(i => (i.src = "/assets/logo_small" + sfx + ".png"));
     $$(".logo-big").forEach(i => (i.src = "/assets/logo" + sfx + ".png"));
   }
