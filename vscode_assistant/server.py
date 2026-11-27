@@ -1730,13 +1730,35 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, stream.read(), "application/pdf",
                                  {"Content-Disposition": "inline; filename*=UTF-8''" + quote(filename)})
         if len(parts) > 1 and parts[1] == "import" and method == "POST":
-            b = self.body()
+            raw_pdf = self.headers.get("Content-Type", "").split(";")[0].strip().lower() == "application/pdf"
+            if raw_pdf:
+                remaining = int(self.headers.get("Content-Length") or 0)
+                if not 0 < remaining <= 60 * 1024 * 1024:
+                    return self.fail(400, "PDF must be nonempty and no larger than 60 MB.")
+                filename = (query.get("filename") or ["upload.pdf"])[0]
+            else:
+                b = self.body()
+                filename = b.get("filename") or "upload.txt"
             tmpdir = tempfile.mkdtemp()
             try:
-                fname = os.path.basename(b.get("filename") or "upload.txt") or "upload.txt"
+                fname = os.path.basename(filename.replace("\\", "/")) or "upload.txt"
+                if fname in (".", ".."):
+                    raise ValueError("Invalid filename.")
                 p = os.path.join(tmpdir, fname)
                 with open(p, "wb") as f:
-                    f.write(base64.b64decode(b.get("data") or ""))
+                    if raw_pdf:
+                        while remaining:
+                            chunk = self.rfile.read(min(remaining, 256 * 1024))
+                            if not chunk:
+                                raise ValueError("PDF upload ended early. Please retry.")
+                            f.write(chunk)
+                            remaining -= len(chunk)
+                    else:
+                        f.write(base64.b64decode(b.get("data") or "", validate=True))
+                if raw_pdf:
+                    with open(p, "rb") as f:
+                        if not f.read(8).startswith(b"%PDF"):
+                            raise ValueError("This file is not a valid PDF.")
                 with self.hub.lock:
                     stored = lib.import_file(kind, p)
                 if kind == "standards":   # an uploaded standard is in force straight away
