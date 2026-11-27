@@ -15,6 +15,7 @@
     view: "chat", activeId: null, chat: null, busy: new Set(),
     models: [], images: [], uploads: [], uploadId: 0, started: {}, libKind: "documents", libCurrent: null, libDirty: false,
     search: "", searchIds: null,
+    waitHistory: new Map(), waitTurns: new Map(),
   };
 
   // ── API ──────────────────────────────────────────────────────────────
@@ -61,7 +62,7 @@
     document.documentElement.dataset.theme = t;
     $$("#themeTabs .tab").forEach(b => b.classList.toggle("active", b.dataset.theme === t));
     const sfx = t === "warm" ? "_warm" : "";
-    $("#favicon").href = "/assets/icon" + sfx + ".png";
+    $("#favicon").href = "/assets/inkelus-icon.png";
     $$(".logo-small, .logo-greet").forEach(i => (i.src = "/assets/logo_small" + sfx + ".png"));
     $$(".logo-big").forEach(i => (i.src = "/assets/logo" + sfx + ".png"));
   }
@@ -116,7 +117,7 @@
     } else if (ev.type === "chat") {
       upsertSummary(ev.chat);
       if (ev.chat.busy) { S.busy.add(ev.chat.id); S.started[ev.chat.id] = S.started[ev.chat.id] || Date.now(); }
-      else { S.busy.delete(ev.chat.id); delete S.started[ev.chat.id]; }
+      else { S.busy.delete(ev.chat.id); delete S.started[ev.chat.id]; S.waitTurns.delete(ev.chat.id); }
       if (S.chat && ev.chat.id === S.chat.id) {
         S.chat.messages = ev.messages;
         S.chat.title = ev.chat.title;
@@ -125,6 +126,8 @@
       renderRail();
     } else if (ev.type === "done") {
       S.busy.delete(ev.chat_id);
+      S.waitTurns.delete(ev.chat_id);
+      delete S.started[ev.chat_id];
       if (S.chat && ev.chat_id === S.chat.id) {
         const i = ev.info;
         $("#stats").textContent = i && typeof i === "object" ? statsText(i) : i === "stopped" ? "Stopped" : "";
@@ -310,6 +313,35 @@
     m.hidden = open === undefined ? !m.hidden : !open;
     $("#plusBtn").classList.toggle("on", !m.hidden);
   }
+  function isPDF(file) {
+    return /\.pdf$/i.test(file.name) || file.type === "application/pdf";
+  }
+
+  function importPDF(kind, file, onProgress = () => {}) {
+    if (!file.size || file.size > 60 * 1024 * 1024)
+      return Promise.reject(new Error("PDF must be nonempty and no larger than 60 MB."));
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/library/" + kind + "/import?filename=" + encodeURIComponent(file.name));
+      xhr.setRequestHeader("X-Token", TOKEN);
+      xhr.setRequestHeader("Content-Type", "application/pdf");
+      xhr.responseType = "json";
+      xhr.timeout = 180000;
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) onProgress(Math.floor(e.loaded / e.total * 100));
+      };
+      xhr.onload = () => {
+        const data = xhr.response || {};
+        if (xhr.status >= 200 && xhr.status < 300 && data.name) resolve(data);
+        else reject(new Error(data.error || "PDF upload failed (HTTP " + xhr.status + ")."));
+      };
+      xhr.onerror = () => reject(new Error("Connection interrupted. Please retry the PDF upload."));
+      xhr.ontimeout = () => reject(new Error("PDF upload timed out. Check that the local app server is running."));
+      xhr.onabort = () => reject(new Error("PDF upload cancelled."));
+      xhr.send(file);
+    });
+  }
+
   async function attachDocs(files) {
     const c = await ensureChat();
     const batch = Array.from(files).map(file => ({id: ++S.uploadId, chat: c.id, file,
@@ -319,17 +351,28 @@
     for (const upload of batch) {
       if (upload.removed) continue;
       try {
-        const data = await new Promise((res, rej) => {
-          const r = new FileReader();
-          r.onload = () => res(String(r.result).split(",")[1] || "");
-          r.onerror = () => rej(new Error("Could not read this file. Try uploading it again."));
-          r.onabort = () => rej(new Error("File reading was cancelled."));
-          r.readAsDataURL(upload.file);
-        });
-        if (upload.removed) continue;
-        upload.status = "Uploading and processing…";
-        renderAttachments();
-        const imported = await api("POST", "library/documents/import", {filename: upload.filename, data});
+        let imported;
+        if (isPDF(upload.file)) {
+          upload.status = "Uploading PDF · 0%";
+          renderAttachments();
+          imported = await importPDF("documents", upload.file, percent => {
+            if (upload.removed) return;
+            upload.status = percent === 100 ? "Saving original PDF…" : "Uploading PDF · " + percent + "%";
+            renderAttachments();
+          });
+        } else {
+          const data = await new Promise((res, rej) => {
+            const r = new FileReader();
+            r.onload = () => res(String(r.result).split(",")[1] || "");
+            r.onerror = () => rej(new Error("Could not read this file. Try uploading it again."));
+            r.onabort = () => rej(new Error("File reading was cancelled."));
+            r.readAsDataURL(upload.file);
+          });
+          if (upload.removed) continue;
+          upload.status = "Uploading and processing…";
+          renderAttachments();
+          imported = await api("POST", "library/documents/import", {filename: upload.filename, data});
+        }
         S.library.documents = Array.from(new Set(S.library.documents.concat(imported.name)));
         if (upload.removed) continue; // the imported copy stays in Library, but is not attached
         const result = await api("POST", "chats/" + c.id + "/documents", {
@@ -443,12 +486,56 @@
     delete: svg("M3 4.5h10M6.5 4.5v-2h3v2M4.5 4.5l.7 9h5.6l.7-9"),
   };
 
-  // Shown in a reply until its first words arrive: what the model is doing and for how long.
-  function working(label) {
-    const id = S.chat ? S.chat.id : "";
-    const secs = S.started[id] ? Math.floor((Date.now() - S.started[id]) / 1000) : 0;
+  // Providers do not expose a total reasoning length. Estimate time to first
+  // visible answer using recent observed waits, never claim measured completion.
+  function waitPercent(seconds, expected) {
+    return Math.min(95, Math.max(0, Math.floor(100 * (1 - Math.exp(-2.3 * seconds / expected)))));
+  }
+
+  function waitTurn(m) {
+    const id = S.chat.id;
+    const knownStart = S.started[id];
+    const started = knownStart || (S.started[id] = Date.now());
+    let turn = S.waitTurns.get(id);
+    if (!turn || turn.started !== started) {
+      const fast = !!(S.chat.params && S.chat.params.fast);
+      const key = JSON.stringify([m.model || S.chat.model || "", fast]);
+      turn = { started, key, expected: S.waitHistory.get(key) || (fast ? 12 : 45),
+        sample: !!knownStart, sampled: false };
+      S.waitTurns.set(id, turn);
+    }
+    return turn;
+  }
+
+  function noteFirstText() {
+    if (!S.chat) return;
+    const turn = S.waitTurns.get(S.chat.id);
+    if (!turn || turn.sampled) return;
+    turn.sampled = true;
+    const seconds = (Date.now() - turn.started) / 1000;
+    if (!turn.sample || seconds < .25 || seconds > 600) return;
+    const previous = S.waitHistory.get(turn.key);
+    S.waitHistory.set(turn.key, previous ? previous * .65 + seconds * .35 : seconds);
+  }
+
+  function working(label, m) {
+    const turn = waitTurn(m);
+    const seconds = Math.max(0, (Date.now() - turn.started) / 1000);
+    const pct = waitPercent(seconds, turn.expected);
     return '<div class="working"><span class="orb"></span><span class="wl">' + esc(label) + '</span>' +
-      '<span class="dots"><i></i><i></i><i></i></span><span class="secs">' + secs + "s</span></div>";
+      '<span class="dots"><i></i><i></i><i></i></span><span class="secs">' + Math.floor(seconds) + 's</span>' +
+      '<progress class="wait-progress" max="100" value="' + pct + '" aria-label="Estimated progress until response starts"></progress>' +
+      '<span class="wait-percent" title="Estimated from response times, not model-reported completion">Est. ' + pct + '%</span></div>';
+  }
+
+  function updateWaitProgress() {
+    const turn = S.chat && S.waitTurns.get(S.chat.id);
+    if (!turn || !S.busy.has(S.chat.id)) return;
+    const seconds = Math.max(0, (Date.now() - turn.started) / 1000);
+    const pct = waitPercent(seconds, turn.expected);
+    $$("#messages .working .secs").forEach(el => (el.textContent = Math.floor(seconds) + "s"));
+    $$("#messages .working .wait-progress").forEach(el => (el.value = pct));
+    $$("#messages .working .wait-percent").forEach(el => (el.textContent = "Est. " + pct + "%"));
   }
 
   function assistantBody(m, live) {
@@ -457,7 +544,9 @@
     let h = "";
     if (live && !text.trim()) {
       const fast = S.chat && S.chat.params && S.chat.params.fast;
-      h += working(think ? "Thinking" : fast ? "Answering" : "Working");
+      h += working(think ? "Thinking" : fast ? "Answering" : "Working", m);
+    } else if (live && text.trim()) {
+      noteFirstText();
     }
     if (think) {
       const showOpen = live && (open || !text.trim());
@@ -520,6 +609,8 @@
       await api("POST", "chats/" + c.id + "/send", { text, images, model });
     } catch (e) {
       S.busy.delete(c.id);
+      S.waitTurns.delete(c.id);
+      delete S.started[c.id];
       updateSend();
       $("#prompt").value = text;
       toast(e.message, true);
@@ -980,11 +1071,14 @@
     if (empty) { $("#libArt").src = "/assets/" + LIB_EMPTY[kind][0] + ".webp"; $("#libEmptyText").textContent = LIB_EMPTY[kind][1]; }
     await libOpen(name);
   }
-  async function libOpen(name) {
+  async function libOpen(name, extractPreview = false) {
+    const kind = S.libKind;
     S.libCurrent = name;
     $("#libName").value = name || "";
-    const got = name ? await api("GET", "library/" + S.libKind + "?name=" + encodeURIComponent(name)) : { text: "" };
-    $("#libText").value = got.text;
+    const got = name ? await api("GET", "library/" + kind + "?name=" + encodeURIComponent(name) +
+      (extractPreview ? "" : "&preview=0")) : { text: "" };
+    if (S.libCurrent !== name || S.libKind !== kind) return;
+    $("#libText").value = got.preview_deferred ? "Original PDF saved. Open the PDF directly or extract a text preview when needed." : got.text;
     const original = !!got.original_pdf;
     $("#libText").readOnly = original;
     $("#libName").readOnly = original;
@@ -995,8 +1089,22 @@
     $("#stdUse").value = m.use_for;
     $("#stdFiles").value = m.files;
     S.libDirty = false;
-    $("#libStatus").innerHTML = original ? 'Extracted text preview only. Your original PDF is unchanged. ' +
-      (S.libKind === 'documents' ? originalPDFLink(name) : '') : '';
+
+    $("#libStatus").innerHTML = original ? (got.preview_deferred ? 'Original PDF preserved. ' : 'Extracted text preview only. Your original PDF is unchanged. ') +
+      (kind === 'documents' ? originalPDFLink(name) : '') +
+      (got.preview_deferred ? ' <button type="button" class="btn small" id="extractPDFPreview">Extract text preview</button>' : '') : '';
+    if (got.preview_deferred) $("#extractPDFPreview").onclick = guard(async () => {
+      $("#extractPDFPreview").disabled = true;
+      $("#extractPDFPreview").textContent = "Extracting…";
+      try { await libOpen(name, true); }
+      finally {
+        const button = $("#extractPDFPreview");
+        if (button && S.libCurrent === name && S.libKind === kind) {
+          button.disabled = false;
+          button.textContent = "Extract text preview";
+        }
+      }
+    });
     $$("#libItems li").forEach(li => li.classList.toggle("active", li.dataset.name === name));
   }
   function libConfirmLeave() {
@@ -1036,14 +1144,21 @@
     if (!libConfirmLeave()) return;
     let last = null;
     for (const f of files) {
-      const data = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(String(r.result).split(",")[1] || "");
-        r.onerror = rej;
-        r.readAsDataURL(f);
-      });
-      try { last = (await api("POST", "library/" + S.libKind + "/import", { filename: f.name, data })).name; }
-      catch (e) { toast(f.name + ": " + e.message, true); }
+      try {
+        if (isPDF(f)) {
+          last = (await importPDF(S.libKind, f, pct => {
+            $("#libStatus").textContent = pct === 100 ? "Saving original PDF…" : "Uploading PDF · " + pct + "%";
+          })).name;
+        } else {
+          const data = await new Promise((res, rej) => {
+            const r = new FileReader();
+            r.onload = () => res(String(r.result).split(",")[1] || "");
+            r.onerror = () => rej(new Error("Could not read this file."));
+            r.readAsDataURL(f);
+          });
+          last = (await api("POST", "library/" + S.libKind + "/import", { filename: f.name, data })).name;
+        }
+      } catch (e) { toast(f.name + ": " + e.message, true); }
     }
     if (last) { await loadLibrary(last); toast("Imported " + files.length + " file" + (files.length === 1 ? "" : "s")); }
   }
@@ -1554,10 +1669,7 @@
     await guard(openChat)(first && first.id);
     refreshModels();
     setInterval(refreshModels, 60000);
-    setInterval(() => {   // keep the "Thinking… 12s" counters ticking
-      const t0 = S.chat && S.started[S.chat.id];
-      if (t0) $$("#messages .working .secs").forEach(el => (el.textContent = Math.floor((Date.now() - t0) / 1000) + "s"));
-    }, 250);
+    setInterval(updateWaitProgress, 250);
   })();
 })();
 

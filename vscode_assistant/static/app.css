@@ -400,6 +400,14 @@ progress { width: 100%; height: 4px; accent-color: var(--accent); margin-top: 10
   animation: dot 1.2s infinite; }
 .working .dots i:nth-child(2) { animation-delay: .2s; } .working .dots i:nth-child(3) { animation-delay: .4s; }
 .working .secs { color: var(--faint); font-variant-numeric: tabular-nums; font-size: 12px; }
+.working { flex-wrap: wrap; max-width: 100%; }
+.working .wait-progress { appearance: none; -webkit-appearance: none; width: 88px; height: 5px; margin: 0;
+  border: 0; border-radius: 999px; overflow: hidden; background: var(--wash); color: var(--accent); }
+.working .wait-progress::-webkit-progress-bar { background: var(--wash); border-radius: 999px; }
+.working .wait-progress::-webkit-progress-value { background: var(--accent); border-radius: 999px; transition: width .25s linear; }
+.working .wait-progress::-moz-progress-bar { background: var(--accent); border-radius: 999px; }
+.working .wait-percent { color: var(--accent-2); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 6ch; }
+@media (prefers-reduced-motion: reduce) { .working .wait-progress::-webkit-progress-value { transition: none; } }
 .tool .st .spin { display: inline-block; width: 9px; height: 9px; margin-right: 5px; vertical-align: -1px; border-radius: 50%;
   border: 2px solid var(--line-2); border-top-color: var(--accent); animation: spin .8s linear infinite; }
 @keyframes orb { 0%, 100% { transform: scale(.82); opacity: .75; } 50% { transform: scale(1); opacity: 1; } }
