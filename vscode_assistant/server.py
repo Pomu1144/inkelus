@@ -1769,7 +1769,11 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET":
             if name:
                 original = name in lib.names(kind) and os.path.isfile(lib.original(kind, name))
-                out = {"name": name, "text": lib.read(kind, name), "original_pdf": original}
+                deferred = (kind == "documents" and original and name.lower().endswith(".pdf")
+                            and (query.get("preview") or [""])[0] == "0"
+                            and not os.path.isfile(lib.text_cache(kind, name)))
+                out = {"name": name, "text": "" if deferred else lib.read(kind, name),
+                       "original_pdf": original, "preview_deferred": deferred}
                 if kind == "standards":
                     out["meta"] = lib.meta(name)
                 return self.ok(out)
