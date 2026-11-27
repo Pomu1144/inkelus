@@ -154,8 +154,12 @@ set `CHROMIUM_PATH` to use a system browser).
   the request is simply sent again without it.
 - **Thinking indicator.** Until the first words of a reply arrive, it shows
   an animated *Working*, *Thinking* (while a reasoning model reasons) or
-  *Answering* (in Fast mode) with a seconds counter. Running tool steps show
-  a small spinner.
+  *Answering* (in Fast mode) with a seconds counter and an animated estimated
+  percentage until the first answer text appears. The estimate adapts to recent
+  waits for the same model and Fast mode during the current app session. Model
+  APIs do not report an exact reasoning completion percentage, so the estimate
+  is capped at 95% and disappears as soon as text streams in. Running tool steps
+  show a small spinner.
 
 ## Projects
 
