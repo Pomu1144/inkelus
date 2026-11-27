@@ -1,4 +1,5 @@
 import base64
+import io
 import os
 import tempfile
 import threading
@@ -133,6 +134,35 @@ class PDFPreservationTests(unittest.TestCase):
         handler.api_library('GET', ['documents', 'original'], {'name':[self.name]})
         self.assertEqual(handler.send.call_args.args[1], self.data)
         self.assertEqual(handler.send.call_args.args[2], 'application/pdf')
+
+    def test_binary_pdf_import_preserves_bytes_without_extraction(self):
+        handler = object.__new__(Handler)
+        handler.hub = SimpleNamespace(library=self.lib, lock=threading.RLock())
+        handler.headers = {'Content-Type': 'application/pdf', 'Content-Length': str(len(self.data))}
+        handler.rfile = io.BytesIO(self.data)
+        handler.ok = Mock()
+        handler.fail = Mock()
+        with patch.object(self.lib, 'read', side_effect=AssertionError('Import must not extract text')):
+            handler.api_library('POST', ['documents', 'import'], {'filename': ['New PDF.pdf']})
+        handler.fail.assert_not_called()
+        name = handler.ok.call_args.args[0]['name']
+        self.assertEqual(name, 'New PDF.pdf')
+        with open(self.lib.path('documents', name), 'rb') as stream:
+            self.assertEqual(stream.read(), self.data)
+        self.assertFalse(os.path.isfile(self.lib.text_cache('documents', name)))
+
+    def test_binary_pdf_import_rejects_oversize_or_truncated_data(self):
+        handler = object.__new__(Handler)
+        handler.hub = SimpleNamespace(library=self.lib, lock=threading.RLock())
+        handler.headers = {'Content-Type': 'application/pdf', 'Content-Length': str(61 * 1024 * 1024)}
+        handler.fail = Mock()
+        handler.api_library('POST', ['documents', 'import'], {'filename': ['Too big.pdf']})
+        self.assertEqual(handler.fail.call_args.args[0], 400)
+        handler.headers['Content-Length'] = str(len(self.data) + 1)
+        handler.rfile = io.BytesIO(self.data)
+        with self.assertRaisesRegex(ValueError, 'ended early'):
+            handler.api_library('POST', ['documents', 'import'], {'filename': ['Incomplete.pdf']})
+        self.assertNotIn('Incomplete.pdf', self.lib.names('documents'))
 
     def test_wire_payloads_include_png_images_for_both_local_provider_types(self):
         from vscode_assistant.providers import Ollama, OpenAICompat
