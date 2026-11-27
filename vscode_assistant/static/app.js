@@ -1071,11 +1071,14 @@
     if (empty) { $("#libArt").src = "/assets/" + LIB_EMPTY[kind][0] + ".webp"; $("#libEmptyText").textContent = LIB_EMPTY[kind][1]; }
     await libOpen(name);
   }
-  async function libOpen(name) {
+  async function libOpen(name, extractPreview = false) {
+    const kind = S.libKind;
     S.libCurrent = name;
     $("#libName").value = name || "";
-    const got = name ? await api("GET", "library/" + S.libKind + "?name=" + encodeURIComponent(name)) : { text: "" };
-    $("#libText").value = got.text;
+    const got = name ? await api("GET", "library/" + kind + "?name=" + encodeURIComponent(name) +
+      (extractPreview ? "" : "&preview=0")) : { text: "" };
+    if (S.libCurrent !== name || S.libKind !== kind) return;
+    $("#libText").value = got.preview_deferred ? "Original PDF saved. Open the PDF directly or extract a text preview when needed." : got.text;
     const original = !!got.original_pdf;
     $("#libText").readOnly = original;
     $("#libName").readOnly = original;
@@ -1086,8 +1089,22 @@
     $("#stdUse").value = m.use_for;
     $("#stdFiles").value = m.files;
     S.libDirty = false;
-    $("#libStatus").innerHTML = original ? 'Extracted text preview only. Your original PDF is unchanged. ' +
-      (S.libKind === 'documents' ? originalPDFLink(name) : '') : '';
+
+    $("#libStatus").innerHTML = original ? (got.preview_deferred ? 'Original PDF preserved. ' : 'Extracted text preview only. Your original PDF is unchanged. ') +
+      (kind === 'documents' ? originalPDFLink(name) : '') +
+      (got.preview_deferred ? ' <button type="button" class="btn small" id="extractPDFPreview">Extract text preview</button>' : '') : '';
+    if (got.preview_deferred) $("#extractPDFPreview").onclick = guard(async () => {
+      $("#extractPDFPreview").disabled = true;
+      $("#extractPDFPreview").textContent = "Extracting…";
+      try { await libOpen(name, true); }
+      finally {
+        const button = $("#extractPDFPreview");
+        if (button && S.libCurrent === name && S.libKind === kind) {
+          button.disabled = false;
+          button.textContent = "Extract text preview";
+        }
+      }
+    });
     $$("#libItems li").forEach(li => li.classList.toggle("active", li.dataset.name === name));
   }
   function libConfirmLeave() {
