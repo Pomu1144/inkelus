@@ -313,6 +313,35 @@
     m.hidden = open === undefined ? !m.hidden : !open;
     $("#plusBtn").classList.toggle("on", !m.hidden);
   }
+  function isPDF(file) {
+    return /\.pdf$/i.test(file.name) || file.type === "application/pdf";
+  }
+
+  function importPDF(kind, file, onProgress = () => {}) {
+    if (!file.size || file.size > 60 * 1024 * 1024)
+      return Promise.reject(new Error("PDF must be nonempty and no larger than 60 MB."));
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/library/" + kind + "/import?filename=" + encodeURIComponent(file.name));
+      xhr.setRequestHeader("X-Token", TOKEN);
+      xhr.setRequestHeader("Content-Type", "application/pdf");
+      xhr.responseType = "json";
+      xhr.timeout = 180000;
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) onProgress(Math.floor(e.loaded / e.total * 100));
+      };
+      xhr.onload = () => {
+        const data = xhr.response || {};
+        if (xhr.status >= 200 && xhr.status < 300 && data.name) resolve(data);
+        else reject(new Error(data.error || "PDF upload failed (HTTP " + xhr.status + ")."));
+      };
+      xhr.onerror = () => reject(new Error("Connection interrupted. Please retry the PDF upload."));
+      xhr.ontimeout = () => reject(new Error("PDF upload timed out. Check that the local app server is running."));
+      xhr.onabort = () => reject(new Error("PDF upload cancelled."));
+      xhr.send(file);
+    });
+  }
+
   async function attachDocs(files) {
     const c = await ensureChat();
     const batch = Array.from(files).map(file => ({id: ++S.uploadId, chat: c.id, file,
@@ -322,17 +351,28 @@
     for (const upload of batch) {
       if (upload.removed) continue;
       try {
-        const data = await new Promise((res, rej) => {
-          const r = new FileReader();
-          r.onload = () => res(String(r.result).split(",")[1] || "");
-          r.onerror = () => rej(new Error("Could not read this file. Try uploading it again."));
-          r.onabort = () => rej(new Error("File reading was cancelled."));
-          r.readAsDataURL(upload.file);
-        });
-        if (upload.removed) continue;
-        upload.status = "Uploading and processing…";
-        renderAttachments();
-        const imported = await api("POST", "library/documents/import", {filename: upload.filename, data});
+        let imported;
+        if (isPDF(upload.file)) {
+          upload.status = "Uploading PDF · 0%";
+          renderAttachments();
+          imported = await importPDF("documents", upload.file, percent => {
+            if (upload.removed) return;
+            upload.status = percent === 100 ? "Saving original PDF…" : "Uploading PDF · " + percent + "%";
+            renderAttachments();
+          });
+        } else {
+          const data = await new Promise((res, rej) => {
+            const r = new FileReader();
+            r.onload = () => res(String(r.result).split(",")[1] || "");
+            r.onerror = () => rej(new Error("Could not read this file. Try uploading it again."));
+            r.onabort = () => rej(new Error("File reading was cancelled."));
+            r.readAsDataURL(upload.file);
+          });
+          if (upload.removed) continue;
+          upload.status = "Uploading and processing…";
+          renderAttachments();
+          imported = await api("POST", "library/documents/import", {filename: upload.filename, data});
+        }
         S.library.documents = Array.from(new Set(S.library.documents.concat(imported.name)));
         if (upload.removed) continue; // the imported copy stays in Library, but is not attached
         const result = await api("POST", "chats/" + c.id + "/documents", {
@@ -1087,14 +1127,21 @@
     if (!libConfirmLeave()) return;
     let last = null;
     for (const f of files) {
-      const data = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(String(r.result).split(",")[1] || "");
-        r.onerror = rej;
-        r.readAsDataURL(f);
-      });
-      try { last = (await api("POST", "library/" + S.libKind + "/import", { filename: f.name, data })).name; }
-      catch (e) { toast(f.name + ": " + e.message, true); }
+      try {
+        if (isPDF(f)) {
+          last = (await importPDF(S.libKind, f, pct => {
+            $("#libStatus").textContent = pct === 100 ? "Saving original PDF…" : "Uploading PDF · " + pct + "%";
+          })).name;
+        } else {
+          const data = await new Promise((res, rej) => {
+            const r = new FileReader();
+            r.onload = () => res(String(r.result).split(",")[1] || "");
+            r.onerror = () => rej(new Error("Could not read this file."));
+            r.readAsDataURL(f);
+          });
+          last = (await api("POST", "library/" + S.libKind + "/import", { filename: f.name, data })).name;
+        }
+      } catch (e) { toast(f.name + ": " + e.message, true); }
     }
     if (last) { await loadLibrary(last); toast("Imported " + files.length + " file" + (files.length === 1 ? "" : "s")); }
   }
