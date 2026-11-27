@@ -31,6 +31,19 @@ const {chromium} = require(require.resolve('playwright', {paths: [process.env.CO
       window.chats = {chatA: t.S.chat, chatB: {id: 'chatB', docs: [], params: {}, messages: []}};
       window.importCount = 0;
       window.importGate = new Promise(resolve => window.finishImport = resolve);
+      window.XMLHttpRequest = class {
+        constructor() { this.upload = {}; }
+        open(method, url) { this.url = url; }
+        setRequestHeader() {}
+        async send(file) {
+          window.importCount++;
+          this.upload.onprogress({lengthComputable:true,loaded:file.size/2,total:file.size});
+          await window.importGate;
+          this.status = file.name === 'broken.pdf' ? 400 : 200;
+          this.response = this.status === 400 ? {error:'Unreadable PDF'} : {name:file.name};
+          this.onload();
+        }
+      };
       window.fetch = async (url, options) => {
         const body = JSON.parse(options.body || '{}');
         if (url.endsWith('/import')) {
@@ -51,14 +64,14 @@ const {chromium} = require(require.resolve('playwright', {paths: [process.env.CO
       t.wire();
       window.upload = t.attachDocs([new File(['sample'], 'Homework.pdf', {type: 'application/pdf'})]);
     });
-    await page.waitForFunction(() => document.querySelector('#attachments').textContent.includes('Uploading and processing'));
+    await page.waitForFunction(() => document.querySelector('#attachments').textContent.includes('Uploading PDF'));
     assert(await page.locator('#sendBtn').isDisabled());
     assert((await page.locator('#attachments').innerText()).includes('Homework.pdf'));
     // Switching chats while an import is in flight must not redirect its attachment.
     await page.evaluate(() => { window.__attachments.S.chat = window.chats.chatB; window.__attachments.renderAttachments(); });
     assert.equal(await page.locator('#attachments .document-card').count(), 0);
     await page.evaluate(async () => { window.finishImport(); await window.upload; });
-    assert.deepEqual(await page.evaluate(() => window.chats.chatA.docs), ['Homework.md']);
+    assert.deepEqual(await page.evaluate(() => window.chats.chatA.docs), ['Homework.pdf']);
     assert.deepEqual(await page.evaluate(() => window.chats.chatB.docs), []);
     await page.evaluate(() => { window.__attachments.S.chat = window.chats.chatA; window.__attachments.renderAttachments(); });
     assert((await page.locator('#attachments').innerText()).includes('Ready · original PDF preserved'));
@@ -82,8 +95,8 @@ const {chromium} = require(require.resolve('playwright', {paths: [process.env.CO
     // Keep a visual fixture of ready, processing, and failed attachment states.
     await page.evaluate(() => {
       const t = window.__attachments;
-      t.S.chat.docs = ['Homework.md'];
-      t.S.uploads = [{id: 10, chat: 'chatA', filename: 'Course_readings.pdf', size: 830000, status: 'Uploading and processing…', pending: true},
+      t.S.chat.docs = ['Homework.pdf'];
+      t.S.uploads = [{id: 10, chat: 'chatA', filename: 'Course_readings.pdf', size: 830000, status: 'Uploading PDF…', pending: true},
         {id: 11, chat: 'chatA', filename: 'broken.pdf', size: 2500, status: 'Upload failed', pending: false, error: 'Unreadable PDF. Try uploading another copy.'}];
       t.renderAttachments();
     });
