@@ -22,6 +22,20 @@ const context = {
   icon: () => '×',
   Vault: {onChange() {}},
   document: {querySelector: element, querySelectorAll: () => [], addEventListener() {}},
+  XMLHttpRequest: class {
+    constructor() { this.upload = {}; }
+    open(method, url) { this.url = url; }
+    setRequestHeader() {}
+    async send(file) {
+      if (file.readError) { this.onerror(); return; }
+      importCount++;
+      this.upload.onprogress({lengthComputable:true,loaded:file.size/2,total:file.size});
+      await gate;
+      this.status = file.filename === 'broken.pdf' || file.name === 'broken.pdf' ? 400 : 200;
+      this.response = this.status === 400 ? {error:'Unreadable PDF'} : {name:file.name};
+      this.onload();
+    }
+  },
   FileReader: class {readAsDataURL(file) {setImmediate(() => {
     if (file.readError) this.onerror(); else {this.result = 'data:application/pdf;base64,eA=='; this.onload();}
   });}},
@@ -42,7 +56,7 @@ const context = {
 context.window = {innerHeight:850,addEventListener() {}};
 const source = fs.readFileSync(path.join(__dirname,'..','vscode_assistant','static','app.js'),'utf8');
 vm.runInNewContext(source.slice(0,source.indexOf('  (async function start() {')) +
-  'window.test = {S, attachDocs, renderAttachments, messageHTML, wire, send};})();', context);
+  'window.test = {S, attachDocs, renderAttachments, messageHTML, wire, send, waitPercent, assistantBody, noteFirstText};})();', context);
 const t = context.window.test;
 const file = name => ({name,size:123,type:'application/pdf'});
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -56,26 +70,26 @@ async function remove(selector, dataset) {
   t.wire();
   const upload = t.attachDocs([file('Homework.pdf')]);
   await tick(); await tick();
-  assert(html().includes('Uploading and processing'));
+  assert(html().includes('Uploading PDF'));
   assert(html().includes('Homework.pdf'));
   assert(element('#sendBtn').disabled);
   await t.send(); // direct Enter/submit calls must be blocked as well
   t.S.chat = chats.B; t.renderAttachments();
   assert(!html().includes('Homework'));
   finishImport(); await upload;
-  assert.deepEqual(chats.A.docs, ['Homework.md']); assert.deepEqual(chats.B.docs, []);
+  assert.deepEqual(chats.A.docs, ['Homework.pdf']); assert.deepEqual(chats.B.docs, []);
   t.S.chat = chats.A; t.renderAttachments();
   assert(html().includes('Ready · original PDF preserved'));
   assert(html().includes('Open PDF'));
   assert(!element('#sendBtn').disabled);
-  await remove('[data-doc-rm]', {docRm:'Homework.md'});
+  await remove('[data-doc-rm]', {docRm:'Homework.pdf'});
   assert(!html().includes('Homework'));
   await t.attachDocs([file('broken.pdf')]);
   assert(html().includes('Upload failed')); assert(html().includes('Unreadable PDF'));
   await remove('[data-upload-rm]', {uploadRm:String(t.S.uploads[0].id)});
   assert(!html().includes('broken.pdf'));
   await t.attachDocs([{...file('unreadable.pdf'),readError:true}]);
-  assert(html().includes('Could not read this file'));
+  assert(html().includes('Connection interrupted'));
   assert(!element('#sendBtn').disabled);
   t.S.uploads = [];
   gate = new Promise(resolve => finishImport = resolve);
@@ -83,10 +97,21 @@ async function remove(selector, dataset) {
   await tick(); await tick();
   await remove('[data-upload-rm]', {uploadRm:String(t.S.uploads[0].id)});
   finishImport(); await cancelled;
-  assert(!chats.A.docs.includes('cancelled.md'));
+  assert(!chats.A.docs.includes('cancelled.pdf'));
   assert(!html().includes('cancelled.pdf'));
   const message = t.messageHTML({role:'user',content:'Review this',documents:[{filename:'<img src=x>.pdf',size:123}]},0,false);
   assert(message.includes('&lt;img src=x&gt;.pdf')); assert(!message.includes('<img src=x>'));
   assert.equal(importCount,3);
+  assert.equal(t.waitPercent(0, 45), 0);
+  assert(t.waitPercent(10, 45) > 0);
+  assert(t.waitPercent(20, 45) > t.waitPercent(10, 45));
+  assert.equal(t.waitPercent(10000, 45), 95);
+  assert(t.waitPercent(10, 12) > t.waitPercent(10, 45));
+  t.S.started.A = Date.now() - 1000;
+  const pending = t.assistantBody({model:'ollama::test',content:''},true);
+  assert(pending.includes('wait-progress') && pending.includes('Est.'));
+  assert(!t.assistantBody({model:'ollama::test',content:'Answer'},true).includes('wait-progress'));
+  assert(t.S.waitHistory.size > 0);
+  assert(!t.assistantBody({content:''},false).includes('wait-progress'));
   console.log('Attachment state checks passed: processing, send lock, chat isolation, ready, removal, failures, cancellation, escaping.');
 })().catch(e => {console.error(e);process.exitCode=1;});
